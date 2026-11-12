@@ -1,5 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
+import { noteColor, parseColorGroups, setColorRules } from '../hooks/graph'
+
 const PANE = {
   plugin: 'context-rail',
   component: 'Pane',
@@ -204,4 +206,23 @@ test('each view draws, and the vault shows as its own part of the context', asyn
   expect(await text(/Reading the vault|Every linked note|Linked from/)).toBeDefined()
   await ui.press({ key: 'view:map' })
   await ui.unmount()
+})
+
+test("notes take the vault's Obsidian colour groups, else their folder's", async () => {
+  const rules = parseColorGroups(
+    JSON.stringify({
+      colorGroups: [
+        { query: 'file:Home', color: { a: 1, rgb: 0xff69b4 } },
+        { query: 'path:work/projects OR path:work/log', color: { a: 1, rgb: 0x2e8b57 } },
+        { query: 'tag:#draft', color: { a: 1, rgb: 0x123456 } },
+      ],
+    }),
+  )
+  expect(rules.length).toBe(2)
+  setColorRules(rules)
+  expect(noteColor('Home.md')).toBe('#ff69b4')
+  expect(noteColor('work/projects/caidence.md')).toBe('#2e8b57')
+  // No group matches: the folder's palette colour, the same every time.
+  expect(noteColor('recipes/soup.md')).toBe(noteColor('recipes/bread.md'))
+  setColorRules([])
 })

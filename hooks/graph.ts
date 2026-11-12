@@ -59,8 +59,55 @@ const AREA_COLORS: Record<string, string> = {
   web: '#378ADD',
   root: '#888780',
 }
+// For a vault whose folders have no colour of their own: a palette handed
+// out by folder name, so a folder keeps its colour from one session to the next.
+const PALETTE = ['#7F77DD', '#1D9E75', '#D85A30', '#378ADD', '#BA7517', '#D4537E', '#5DCAA5', '#9b59b6', '#639922']
+
 export function areaColor(area: string): string {
-  return AREA_COLORS[area] ?? '#888780'
+  if (area === 'root') return '#888780'
+  return AREA_COLORS[area] ?? PALETTE[Math.floor(hash(area) * PALETTE.length) % PALETTE.length] ?? '#888780'
+}
+
+/** One of Obsidian's graph colour groups: a note matching any term takes its colour. */
+export type ColorRule = { terms: { kind: 'path' | 'file'; value: string }[]; color: string }
+
+let colorRules: ColorRule[] = []
+
+/** The vault's own colours, from `.obsidian/graph.json`; none, and areas use the palette. */
+export function setColorRules(rules: ColorRule[]) {
+  colorRules = rules
+}
+
+/**
+ * Obsidian's graph colour groups, as `.obsidian/graph.json` holds them. Only
+ * `path:` and `file:` terms joined by OR are read; a group using anything
+ * else (tags, AND) is skipped.
+ */
+export function parseColorGroups(json: string): ColorRule[] {
+  try {
+    const groups = (JSON.parse(json) as { colorGroups?: { query?: string; color?: { rgb?: number } }[] }).colorGroups ?? []
+    return groups.flatMap(g => {
+      const terms = (g.query ?? '').split(/\s+OR\s+/i).map(t => t.trim())
+      const parsed = terms.map(t => {
+        const m = /^(path|file):"?([^"]+)"?$/i.exec(t)
+        return m ? { kind: (m[1] ?? '').toLowerCase() as 'path' | 'file', value: (m[2] ?? '').toLowerCase() } : null
+      })
+      if (parsed.length === 0 || parsed.some(t => t === null) || typeof g.color?.rgb !== 'number') return []
+      return [{ terms: parsed as ColorRule['terms'], color: `#${g.color.rgb.toString(16).padStart(6, '0')}` }]
+    })
+  } catch {
+    return []
+  }
+}
+
+/** A note's colour: the first of the vault's colour groups it matches, else its area's. */
+export function noteColor(path: string): string {
+  const lower = path.toLowerCase()
+  const name = (lower.split('/').pop() ?? lower).replace(/\.md$/, '')
+  for (const rule of colorRules) {
+    if (rule.terms.some(t => (t.kind === 'path' ? lower.includes(t.value) : name === t.value))) return rule.color
+  }
+  return areaColor(areaOf(path))
 }
 
 function hash(text: string, seed = 5381): number {
@@ -194,11 +241,13 @@ export function graphSvg({ used, latestTurn, focus, index, width }: GraphInput):
       const y = f.cy + Math.sin(angle) * (f.rim + 6) + 4
       const anchor = Math.abs(Math.cos(angle)) < 0.25 ? 'middle' : Math.cos(angle) > 0 ? 'start' : 'end'
       const isPresent = nodes.some(n => areaOf(n.path) === area)
+      const biggestHere = nodes.filter(n => areaOf(n.path) === area).sort((a, b) => b.tokens - a.tokens)[0]
+      const rimColor = biggestHere ? noteColor(biggestHere.path) : areaColor(area)
       const label = area === 'root' ? 'vault root' : area
       const w = label.length * 7.2
       const x0 = anchor === 'start' ? x : anchor === 'end' ? x - w : x - w / 2
       rimBoxes.push({ x0, x1: x0 + w, y0: y - 12, y1: y + 3 })
-      return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="${anchor}" font-size="12.5" fill="${areaColor(area)}" fill-opacity="${isPresent ? 0.95 : 0.35}">${area === 'root' ? 'vault root' : area}</text>`
+      return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="${anchor}" font-size="12.5" fill="${rimColor}" fill-opacity="${isPresent ? 0.95 : 0.35}">${area === 'root' ? 'vault root' : area}</text>`
     })
     .join('')
 
@@ -208,7 +257,7 @@ export function graphSvg({ used, latestTurn, focus, index, width }: GraphInput):
     .map(n => {
       const isNow = isLatest(n)
       const isFocus = n.path === focus
-      const color = areaColor(areaOf(n.path))
+      const color = noteColor(n.path)
       const cx = n.x.toFixed(1)
       const cy = n.y.toFixed(1)
       const r = radius(n)
@@ -307,7 +356,7 @@ const svgOpen = (w: number, h: number) =>
 const clampWidth = (width = 380) => Math.max(260, Math.min(1400, Math.round(width)))
 
 /** A colour lightened toward white by `amount` (0 to 1). */
-function lighten(hex: string, amount: number): string {
+export function lighten(hex: string, amount: number): string {
   const n = parseInt(hex.slice(1), 16)
   const mix = (c: number) => Math.round(c + (255 - c) * amount)
   const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map(mix)
@@ -319,19 +368,20 @@ function fit(name: string, chars: number): string {
   return name.length <= chars ? name : `${name.slice(0, Math.max(1, chars - 1))}…`
 }
 
-export type ShareGroup = { name: string; tokens: number; area: string; isUsed: boolean }
+export type ShareGroup = { name: string; tokens: number; area: string; isUsed: boolean; color?: string }
 
 /** A donut of the tokens loaded by folder, the latest turn's folders at full strength. */
 export function shareSvg(groups: ShareGroup[], width?: number): string {
   const w = clampWidth(width)
   const total = groups.reduce((n, g) => n + g.tokens, 0)
-  // Folders of one area take lighter shades of its colour, in order.
+  // Folders that share a colour take lighter shades of it, in order.
   const seen = new Map<string, number>()
   const colorOf = new Map(
     groups.map(g => {
-      const i = seen.get(g.area) ?? 0
-      seen.set(g.area, i + 1)
-      return [g.name, lighten(areaColor(g.area), Math.min(0.6, i * 0.3))]
+      const base = g.color ?? areaColor(g.area)
+      const i = seen.get(base) ?? 0
+      seen.set(base, i + 1)
+      return [g.name, lighten(base, Math.min(0.6, i * 0.3))]
     }),
   )
   const size = Math.min(w - 60, 300)
@@ -408,7 +458,7 @@ export function timelineSvg(reads: TimelineRead[], latestTurn: number, width?: n
             y: y + hh / 2,
             text: `${noteName(r.path)} · ${k(r.tokens)}${r.isRepeat ? ' · read again' : ''}`,
           })
-          return `<rect id="i-${id}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(hh - 1).toFixed(1)}" rx="2" fill="${areaColor(areaOf(r.path))}" fill-opacity="${isNow ? 1 : 0.4}"${r.isRepeat ? ' stroke="#e6e6e6" stroke-dasharray="3 2" stroke-width="1"' : ''}></rect>`
+          return `<rect id="i-${id}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(hh - 1).toFixed(1)}" rx="2" fill="${noteColor(r.path)}" fill-opacity="${isNow ? 1 : 0.4}"${r.isRepeat ? ' stroke="#e6e6e6" stroke-dasharray="3 2" stroke-width="1"' : ''}></rect>`
         })
         .join('')
       const total = totals[i] ?? 0
@@ -465,7 +515,7 @@ export function treemapSvg(notes: TreemapNote[], width?: number): string {
           const fill = n.isLatest ? '#f2f2f2' : '#cfcfcf'
           const id = `r${treeTips.length}`
           treeTips.push({ id, x: c.x + c.w / 2, y: c.y + c.h / 2, text: `${full} · ${k(n.tokens)}` })
-          return `<g><rect id="i-${id}" x="${(c.x + 1).toFixed(1)}" y="${(c.y + 1).toFixed(1)}" width="${Math.max(0, c.w - 2).toFixed(1)}" height="${Math.max(0, c.h - 2).toFixed(1)}" rx="3" fill="${areaColor(a.area)}" fill-opacity="${n.isLatest ? 0.9 : 0.35}"/>${fitsName ? `<text x="${(c.x + 7).toFixed(1)}" y="${(c.y + 16).toFixed(1)}" font-size="13" fill="${fill}"${n.isLatest ? ' font-weight="600"' : ''}>${escape(name)}</text>` : ''}${fitsSize ? `<text x="${(c.x + 7).toFixed(1)}" y="${(c.y + 31).toFixed(1)}" font-size="12" fill="${fill}" fill-opacity="0.8">${k(n.tokens)}</text>` : ''}</g>`
+          return `<g><rect id="i-${id}" x="${(c.x + 1).toFixed(1)}" y="${(c.y + 1).toFixed(1)}" width="${Math.max(0, c.w - 2).toFixed(1)}" height="${Math.max(0, c.h - 2).toFixed(1)}" rx="3" fill="${noteColor(n.path)}" fill-opacity="${n.isLatest ? 0.9 : 0.35}"/>${fitsName ? `<text x="${(c.x + 7).toFixed(1)}" y="${(c.y + 16).toFixed(1)}" font-size="13" fill="${fill}"${n.isLatest ? ' font-weight="600"' : ''}>${escape(name)}</text>` : ''}${fitsSize ? `<text x="${(c.x + 7).toFixed(1)}" y="${(c.y + 31).toFixed(1)}" font-size="12" fill="${fill}" fill-opacity="0.8">${k(n.tokens)}</text>` : ''}</g>`
         })
         .join('')
     })

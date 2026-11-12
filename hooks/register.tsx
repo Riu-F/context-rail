@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { ContextFill, Limit, ReadKind, Totals, Turn } from '../types'
-import { gaps, graphSvg, linksIn, noteName, shareSvg, timelineSvg, treemapSvg } from './graph'
+import { gaps, graphSvg, lighten, linksIn, noteColor, noteName, parseColorGroups, setColorRules, shareSvg, timelineSvg, treemapSvg } from './graph'
 import type { GraphNode, VaultIndex } from './graph'
 
 const PANE = 'context-rail'
@@ -295,6 +295,12 @@ async function buildIndex($: EngineInterface, root: string) {
       }
     }
     await walk('')
+    // The vault's own colours, as its Obsidian graph sets them.
+    try {
+      setColorRules(parseColorGroups(await $.fs.read(`${root}/.obsidian/graph.json`)))
+    } catch {
+      setColorRules([])
+    }
     const byName = new Map<string, string>()
     const tokenCount = new Map<string, number>()
     for (const n of notes) {
@@ -694,6 +700,15 @@ export const register: Register = on => {
         isUsed: paths.some(p => usedNow.has(p)),
       }))
       .sort((a, b) => b.tokens - a.tokens || b.paths.length - a.paths.length)
+    const shadeSeen = new Map<string, number>()
+    const groupColor = new Map(
+      groupRows.map(g => {
+        const base = noteColor(g.paths.find(p => !isFolder(p)) ?? g.paths[0] ?? g.name)
+        const i = shadeSeen.get(base) ?? 0
+        shadeSeen.set(base, i + 1)
+        return [g.name, lighten(base, Math.min(0.6, i * 0.3))]
+      }),
+    )
     const isMissing = vault.length === 0 && !hasVaultFolder
 
     // ---- the graph's data: each note read, at its size and latest turn
@@ -724,7 +739,13 @@ export const register: Register = on => {
       viewSource = shareSvg(
         groupRows
           .filter(g => g.tokens > 0)
-          .map(g => ({ name: g.name, tokens: g.tokens, area: areaOfGroup(g.name), isUsed: g.isUsed })),
+          .map(g => ({
+            name: g.name,
+            tokens: g.tokens,
+            area: areaOfGroup(g.name),
+            isUsed: g.isUsed,
+            color: noteColor(g.paths.find(p => !isFolder(p)) ?? g.name),
+          })),
         drawWidth,
       )
     } else if (chosenView === 'timeline') {
@@ -761,6 +782,12 @@ export const register: Register = on => {
         width: drawWidth,
       })
     }
+    // The pane caps an image's height unless it is given one, so the chart is
+    // sized here: the pane's width (cells of its code font, about 7.8 pixels
+    // each) and the chart's own proportions, so it grows both ways.
+    const box = /viewBox="0 0 ([\d.]+) ([\d.]+)"/.exec(viewSource)
+    const viewAspect = box ? Number(box[2]) / Number(box[1]) : 1
+    const chartWidth = Math.max(240, Math.round(e.props.bodyColumns * 7.8))
     const gapList = chosenView === 'gaps' ? gaps(graphNodes, vaultIndex, 15) : []
     const gapRows =
       chosenView !== 'gaps' ? null : !vaultIndex ? (
@@ -911,6 +938,8 @@ export const register: Register = on => {
                 isInteractive
                 alt={viewAlt}
                 source={viewSource}
+                width={chartWidth}
+                height={Math.round(chartWidth * viewAspect)}
               />
             )}
         <Box flexDirection="column" gap={1}>
@@ -925,7 +954,7 @@ export const register: Register = on => {
                 {disclosure(`g:${g.name}`, g.name, value, !g.isUsed)}
                 {g.tokens > 0 &&
                   bar(`bar-g-${g.name}`, `${g.name}: ${Math.round(share * 100)}% of vault tokens read`, [
-                    { share, color: g.isUsed ? BLUE : BLUE_DIM },
+                    { share, color: `${groupColor.get(g.name) ?? BLUE}${g.isUsed ? '' : '66'}` },
                   ])}
                 {isOpen(`g:${g.name}`) &&
                   g.paths.map(p =>
