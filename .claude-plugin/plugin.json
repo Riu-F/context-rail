@@ -1,6 +1,6 @@
 {
   "name": "context-rail",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "description": "A side pane for what a session holds: folders, context, which Obsidian vault notes each turn read (as a map, share, timeline, treemap or gaps), plan limits and cost",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -10,5 +10,6 @@
       "description": "The vault's folder, as a full path or starting with ~/. Leave empty to find it: the first folder the session uses that is inside a vault (a folder holding .obsidian).",
       "default": ""
     }
-  }
+  },
+  "license": "MIT"
 }

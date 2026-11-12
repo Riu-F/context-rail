@@ -2,6 +2,15 @@
 
 A pane beside the chat in Claude Code and the Claude desktop app that shows what the session holds, which of your Obsidian notes it has read, and what it costs.
 
+![The Claude desktop app with the context rail open beside a chat. The rail shows the session's folder, a context bar with the vault's share in purple, and a map of the 22 vault notes the session has read, coloured by folder. Under the reply, a line gives the turn's cost and the vault notes it used.](media/chat.webp)
+
+I keep an Obsidian vault of notes about myself and my work, and Claude's answers are far better when it reads them. But I could never tell whether a session had actually read the vault, which notes it read, or how much of the context they took. The rail shows that as it happens: every note each response reads, how they link, and their share of the context.
+
+<p>
+  <img src="media/rail.webp" width="300" alt="The whole rail: folders, context bar, the map of vault notes read with their names, each vault folder's share of the tokens read as coloured bars, and the plan limits.">
+  <img src="media/rail.gif" width="360" alt="The rail while a session reads more notes: the map of notes read, then the Timeline view stacking each turn's notes, then the Treemap, then back to the map.">
+</p>
+
 - **Folders:** the session's folders. Hover for the path, click to open it in Finder. If no Obsidian vault is in the session, it says so here in orange.
 - **Context:** how full the context window is, as a bar coloured by what fills it, with your vault's notes as their own purple part. Open it to see each part.
 - **Obsidian vault:** which notes the session has read, grouped by folder, with each folder's share of the tokens read. What the latest turn used is drawn bright, the rest dim.
