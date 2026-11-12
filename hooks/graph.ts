@@ -124,22 +124,10 @@ function k(tokens: number): string {
  */
 export function graphSvg({ used, latestTurn, focus, index, width }: GraphInput): string {
   const f = frameFor(width)
-  const usedSet = new Set(used.map(n => n.path))
 
   // Notes linked to what was loaded but not loaded themselves, the most
   // linked first.
-  const ghostScore = new Map<string, number>()
-  if (index) {
-    for (const n of used) {
-      for (const other of index.links.get(n.path) ?? []) {
-        if (!usedSet.has(other)) ghostScore.set(other, (ghostScore.get(other) ?? 0) + 1)
-      }
-    }
-  }
-  const ghosts = [...ghostScore.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 40)
-    .map(([path]) => ({ path, tokens: index?.tokens.get(path) ?? 0, turn: 0 }))
+  const ghosts = gaps(used, index).map(g => ({ path: g.path, tokens: g.tokens, turn: 0 }))
 
   const areaCount = new Map<string, number>()
   for (const path of index ? index.tokens.keys() : [...used, ...ghosts].map(n => n.path)) {
@@ -263,4 +251,180 @@ export function graphSvg({ used, latestTurn, focus, index, width }: GraphInput):
     .join('')
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${f.width}" height="${f.height}" viewBox="0 0 ${f.width} ${f.height}" font-family="-apple-system, system-ui, sans-serif">${edges.join('')}${circles}${labels}${rim}</svg>`
+}
+
+// ---------------------------------------------------------------- other views
+
+/** Notes linked to what was loaded but not loaded, the most linked first. */
+export function gaps(used: GraphNode[], index: VaultIndex | null, limit = 40) {
+  if (!index) return []
+  const usedSet = new Set(used.map(n => n.path))
+  const from = new Map<string, string[]>()
+  for (const n of used) {
+    for (const other of index.links.get(n.path) ?? []) {
+      if (!usedSet.has(other)) from.set(other, [...(from.get(other) ?? []), n.path])
+    }
+  }
+  return [...from.entries()]
+    .map(([path, sources]) => ({ path, sources, tokens: index.tokens.get(path) ?? 0 }))
+    .sort((a, b) => b.sources.length - a.sources.length || a.tokens - b.tokens)
+    .slice(0, limit)
+}
+
+const svgOpen = (w: number, h: number) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" font-family="-apple-system, system-ui, sans-serif">`
+const clampWidth = (width = 380) => Math.max(260, Math.min(1400, Math.round(width)))
+
+/** A colour lightened toward white by `amount` (0 to 1). */
+function lighten(hex: string, amount: number): string {
+  const n = parseInt(hex.slice(1), 16)
+  const mix = (c: number) => Math.round(c + (255 - c) * amount)
+  const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map(mix)
+  return `#${(((r ?? 0) << 16) | ((g ?? 0) << 8) | (b ?? 0)).toString(16).padStart(6, '0')}`
+}
+
+/** A name cut to `chars`, with an ellipsis when cut. */
+function fit(name: string, chars: number): string {
+  return name.length <= chars ? name : `${name.slice(0, Math.max(1, chars - 1))}…`
+}
+
+export type ShareGroup = { name: string; tokens: number; area: string; isUsed: boolean }
+
+/** A donut of the tokens loaded by folder, the latest turn's folders at full strength. */
+export function shareSvg(groups: ShareGroup[], width?: number): string {
+  const w = clampWidth(width)
+  const total = groups.reduce((n, g) => n + g.tokens, 0)
+  // Folders of one area take lighter shades of its colour, in order.
+  const seen = new Map<string, number>()
+  const colorOf = new Map(
+    groups.map(g => {
+      const i = seen.get(g.area) ?? 0
+      seen.set(g.area, i + 1)
+      return [g.name, lighten(areaColor(g.area), Math.min(0.6, i * 0.3))]
+    }),
+  )
+  const size = Math.min(w - 40, 300)
+  const r = size / 2
+  const inner = r * 0.62
+  const cx = w / 2
+  const cy = r + 10
+  const rowH = 20
+  const legendTop = cy + r + 22
+  const h = legendTop + groups.length * rowH + 6
+  let angle = -Math.PI / 2
+  const arcs = groups
+    .filter(g => g.tokens > 0)
+    .map(g => {
+      const sweep = (g.tokens / total) * Math.PI * 2
+      const a0 = angle
+      const a1 = angle + Math.max(0, sweep - 0.012)
+      angle += sweep
+      const big = a1 - a0 > Math.PI ? 1 : 0
+      const p = (a: number, rad: number) => `${(cx + Math.cos(a) * rad).toFixed(1)} ${(cy + Math.sin(a) * rad).toFixed(1)}`
+      const d =
+        sweep >= Math.PI * 2 - 0.02
+          ? `M ${p(-Math.PI / 2, r)} A ${r} ${r} 0 1 1 ${p(Math.PI * 1.4999, r)} L ${p(Math.PI * 1.4999, inner)} A ${inner} ${inner} 0 1 0 ${p(-Math.PI / 2, inner)} Z`
+          : `M ${p(a0, r)} A ${r} ${r} 0 ${big} 1 ${p(a1, r)} L ${p(a1, inner)} A ${inner} ${inner} 0 ${big} 0 ${p(a0, inner)} Z`
+      const pct = Math.round((g.tokens / total) * 100)
+      return `<path d="${d}" fill="${colorOf.get(g.name) ?? areaColor(g.area)}" fill-opacity="${g.isUsed ? 1 : 0.35}"><title>${escape(`${g.name}: ${k(g.tokens)} tokens, ${pct}%`)}</title></path>`
+    })
+    .join('')
+  const center = `<text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="22" font-weight="600" fill="#e6e6e6">${k(total)}</text><text x="${cx}" y="${cy + 18}" text-anchor="middle" font-size="12" fill="#8a8a8a">tokens loaded</text>`
+  // A key under the donut: colour, folder, share. Data-surface text.
+  const legend = groups
+    .map((g, i) => {
+      const y = legendTop + i * rowH
+      const pct = total > 0 ? Math.round((g.tokens / total) * 100) : 0
+      const fill = g.isUsed ? '#e6e6e6' : '#8a8a8a'
+      return `<rect x="16" y="${y - 9}" width="10" height="10" rx="2" fill="${colorOf.get(g.name) ?? areaColor(g.area)}" fill-opacity="${g.isUsed ? 1 : 0.35}"/><text x="34" y="${y}" font-size="12" fill="${fill}">${escape(g.name)}</text><text x="${w - 16}" y="${y}" text-anchor="end" font-size="12" fill="${fill}">${pct}%</text>`
+    })
+    .join('')
+  return `${svgOpen(w, h)}${arcs}${center}${legend}</svg>`
+}
+
+export type TimelineRead = { path: string; turn: number; tokens: number; isRepeat: boolean }
+
+/** Turns left to right, each turn's notes stacked by tokens. */
+export function timelineSvg(reads: TimelineRead[], latestTurn: number, width?: number): string {
+  const w = clampWidth(width)
+  const first = Math.max(1, latestTurn - 11)
+  const turns = Array.from({ length: latestTurn - first + 1 }, (_, i) => first + i)
+  const byTurn = new Map(turns.map(t => [t, reads.filter(r => r.turn === t).sort((a, b) => b.tokens - a.tokens)]))
+  const totals = turns.map(t => (byTurn.get(t) ?? []).reduce((n, r) => n + r.tokens, 0))
+  const max = Math.max(1, ...totals)
+  const h = 230
+  const top = 26
+  const base = h - 26
+  const slot = (w - 24) / turns.length
+  const barW = Math.min(44, slot * 0.62)
+  const bars = turns
+    .map((t, i) => {
+      const x = 12 + slot * i + (slot - barW) / 2
+      let y = base
+      const isNow = t === latestTurn
+      const segs = (byTurn.get(t) ?? [])
+        .map(r => {
+          const hh = Math.max(2, (r.tokens / max) * (base - top))
+          y -= hh
+          const tip = `${noteName(r.path)}: ${k(r.tokens)} tokens, turn ${t}${r.isRepeat ? ', read again' : ''}`
+          return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(hh - 1).toFixed(1)}" rx="2" fill="${areaColor(areaOf(r.path))}" fill-opacity="${isNow ? 1 : 0.4}"${r.isRepeat ? ' stroke="#e6e6e6" stroke-dasharray="3 2" stroke-width="1"' : ''}><title>${escape(tip)}</title></rect>`
+        })
+        .join('')
+      const total = totals[i] ?? 0
+      const head = total > 0 ? `<text x="${(x + barW / 2).toFixed(1)}" y="${(y - 6).toFixed(1)}" text-anchor="middle" font-size="11" fill="${isNow ? '#e6e6e6' : '#8a8a8a'}">${k(total)}</text>` : ''
+      const foot = `<text x="${(x + barW / 2).toFixed(1)}" y="${base + 16}" text-anchor="middle" font-size="12" fill="${isNow ? '#e6e6e6' : '#8a8a8a'}"${isNow ? ' font-weight="600"' : ''}>${t}</text>`
+      return segs + head + foot
+    })
+    .join('')
+  const axis = `<line x1="12" y1="${base}" x2="${w - 12}" y2="${base}" stroke="#8a8a8a" stroke-opacity="0.4"/>`
+  return `${svgOpen(w, h)}${axis}${bars}</svg>`
+}
+
+export type TreemapNote = { path: string; tokens: number; isLatest: boolean }
+
+type Rect = { x: number; y: number; w: number; h: number }
+
+/** Splits a rectangle between items by weight, along its longer side. */
+function split<T>(items: T[], weight: (t: T) => number, r: Rect): [T, Rect][] {
+  const total = items.reduce((n, t) => n + weight(t), 0) || 1
+  let offset = 0
+  return items.map(t => {
+    const share = weight(t) / total
+    const along = r.w >= r.h
+    const cell = along
+      ? { x: r.x + offset * r.w, y: r.y, w: share * r.w, h: r.h }
+      : { x: r.x, y: r.y + offset * r.h, w: r.w, h: share * r.h }
+    offset += share
+    return [t, cell]
+  })
+}
+
+/** Areas, then their notes, as rectangles sized by tokens. */
+export function treemapSvg(notes: TreemapNote[], width?: number): string {
+  const w = clampWidth(width)
+  const h = Math.round(Math.max(220, Math.min(560, w * 0.75)))
+  const areas = new Map<string, TreemapNote[]>()
+  for (const n of notes.filter(n => n.tokens > 0)) areas.set(areaOf(n.path), [...(areas.get(areaOf(n.path)) ?? []), n])
+  const areaList = [...areas.entries()]
+    .map(([area, list]) => ({ area, list: list.sort((a, b) => b.tokens - a.tokens), tokens: list.reduce((n, x) => n + x.tokens, 0) }))
+    .sort((a, b) => b.tokens - a.tokens)
+  const cells = split(areaList, a => a.tokens, { x: 0, y: 0, w, h })
+    .map(([a, r]) => {
+      const inner = { x: r.x + 2, y: r.y + 2, w: Math.max(0, r.w - 4), h: Math.max(0, r.h - 4) }
+      // Files split the other way from their area, so long thin strips are rarer.
+      const notesIn = split(a.list, n => n.tokens, inner.w >= inner.h ? { ...inner, w: inner.w, h: inner.h } : inner)
+      return notesIn
+        .map(([n, c]) => {
+          const full = noteName(n.path)
+          const chars = Math.floor((c.w - 14) / 6.6)
+          const fitsName = chars >= 4 && c.h > 20
+          const name = fit(full, chars)
+          const fitsSize = fitsName && c.h > 38
+          const fill = n.isLatest ? '#f2f2f2' : '#cfcfcf'
+          return `<g><title>${escape(`${full}: ${k(n.tokens)} tokens`)}</title><rect x="${(c.x + 1).toFixed(1)}" y="${(c.y + 1).toFixed(1)}" width="${Math.max(0, c.w - 2).toFixed(1)}" height="${Math.max(0, c.h - 2).toFixed(1)}" rx="3" fill="${areaColor(a.area)}" fill-opacity="${n.isLatest ? 0.9 : 0.35}"/>${fitsName ? `<text x="${(c.x + 7).toFixed(1)}" y="${(c.y + 16).toFixed(1)}" font-size="12" fill="${fill}"${n.isLatest ? ' font-weight="600"' : ''}>${escape(name)}</text>` : ''}${fitsSize ? `<text x="${(c.x + 7).toFixed(1)}" y="${(c.y + 31).toFixed(1)}" font-size="11" fill="${fill}" fill-opacity="0.8">${k(n.tokens)}</text>` : ''}</g>`
+        })
+        .join('')
+    })
+    .join('')
+  return `${svgOpen(w, h)}${cells}</svg>`
 }

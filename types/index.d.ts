@@ -51,6 +51,7 @@ declare module 'claude-code' {
       isPaneClosed: boolean
       focus: string | null
       indexStamp: number
+      view: string
     }
   }
 }

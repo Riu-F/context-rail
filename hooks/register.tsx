@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { ContextFill, Limit, ReadKind, Totals, Turn } from '../types'
-import { graphSvg, linksIn } from './graph'
+import { gaps, graphSvg, linksIn, noteName, shareSvg, timelineSvg, treemapSvg } from './graph'
 import type { GraphNode, VaultIndex } from './graph'
 
 const PANE = 'context-rail'
@@ -10,7 +10,7 @@ const TITLE = 'Session'
 
 // The vault every session should have. Matched anywhere in a path, so it
 // holds on any machine where the vault sits on the Desktop.
-const VAULT_NAME = 'Context vault'
+const VAULT_NAME = 'Obsidian vault'
 const VAULT_PATH = /(?:~|\/Users\/[^/\s"'`]+)\/Desktop\/claude-context(\/[^\s"'`;|&)<>]*)?/g
 
 // Change a shape tag when that value's fields change: it declines what an
@@ -33,6 +33,15 @@ const open = atom({ plugin: 'context-rail', key: 'open' } as const, [], {
 // The note picked in the vault list, ringed in the graph.
 const focus = atom({ plugin: 'context-rail', key: 'focus' } as const, null)
 // Bumped when the vault index is built, so the pane redraws with the links.
+// Which drawing the vault section shows.
+const view = atom({ plugin: 'context-rail', key: 'view' } as const, 'map')
+const VIEWS = [
+  { id: 'map', label: 'Map' },
+  { id: 'share', label: 'Share' },
+  { id: 'timeline', label: 'Timeline' },
+  { id: 'treemap', label: 'Treemap' },
+  { id: 'gaps', label: 'Gaps' },
+] as const
 const indexStamp = atom({ plugin: 'context-rail', key: 'indexStamp' } as const, 0)
 
 // The vault's notes and links, read once per load of the mod.
@@ -54,10 +63,13 @@ const PART_COLORS: Record<string, string> = {
   'System tools': '#3aa883',
   'System prompt': AMBER,
   'Custom agents': '#b07cf0',
+  [VAULT_NAME]: '#c084fc',
 }
 function partColor(name: string): string {
   return PART_COLORS[name] ?? '#9a9a9a'
 }
+const FOLDER_MISSING_ICON =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#e5a50a" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2.2h8.4A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/><path d="M9.5 11l5 5M14.5 11l-5 5"/></svg>'
 const FOLDER_ICON =
   '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9a9a9a" stroke-width="1.8" stroke-linejoin="round"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2.2h8.4A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/></svg>'
 
@@ -189,6 +201,11 @@ function shellVaultPaths(command: string, cwdInVault: string | null): string[] {
 }
 
 /** The vault folder a path is grouped under in the chart. */
+/** The area a vault folder group belongs to, for its colour. */
+function areaOfGroup(group: string): string {
+  return group === 'Vault root' ? 'root' : (group.split('/')[0] ?? 'root')
+}
+
 function groupOf(path: string): string {
   const parts = path.split('/').filter(p => p !== '' && p !== '.')
   const depth = isFolder(path) ? parts.length : parts.length - 1
@@ -654,74 +671,8 @@ export const register: Register = on => {
       </Box>
     )
 
-    // ---- context, coloured by what fills it
-    const ctx = sum.context
-    const context = ctx && ctx.percent !== undefined && (
-      <Box flexDirection="column" gap={1}>
-        {heading('Context')}
-        <Box flexDirection="column">
-          {disclosure(
-            'context',
-            `${ctx.percent}% used`,
-            `${tokens(ctx.tokens ?? 0)} / ${tokens(ctx.window)}`,
-          )}
-          {bar(
-            'bar-context',
-            `Context: ${ctx.percent}% used`,
-            ctx.parts.map(part => ({ share: part.tokens / ctx.window, color: partColor(part.name) })),
-          )}
-          {isOpen('context') &&
-            ctx.parts.map(part => (
-              <Box key={`c-${part.name}`} justifyContent="space-between" gap={1} paddingLeft={2}>
-                <Text>
-                  <Text color={partColor(part.name)}>■ </Text>
-                  <Text dimColor>{part.name}</Text>
-                </Text>
-                <Text dimColor tabular>
-                  {tokens(part.tokens)}
-                </Text>
-              </Box>
-            ))}
-        </Box>
-      </Box>
-    )
-
-    // ---- folders: a name with a folder mark; the path shows on hover,
-    // and a press opens the folder.
     const dirs = [cwd, ...added.filter(d => d !== cwd)]
     const hasVaultFolder = dirs.some(d => vaultPaths(d).length > 0)
-    const folderList = (
-      <Box flexDirection="column" gap={1}>
-        {heading('Folders')}
-        <Box flexDirection="column">
-          {dirs.map((d, i) => (
-            <Box key={`d-${i}`} flexDirection="column" hover={{ scope: `dir-${i}` }}>
-              <Box gap={1} alignItems="center">
-                {Svg ? (
-                  <Svg alt="Folder" width={16} height={16} source={FOLDER_ICON} />
-                ) : (
-                  <Text dimColor>▸</Text>
-                )}
-                <Button
-                  key={`open-${i}`}
-                  plain
-                  hover={{ scope: `dir-${i}`, underline: true }}
-                  onPress={() => openFolder($, d)}
-                >
-                  {d.split('/').filter(Boolean).pop() ?? d}
-                </Button>
-              </Box>
-              <Box display="none" hover={{ scope: `dir-${i}`, display: 'flex' }} paddingLeft={3}>
-                <Text dimColor wrap="truncate-start">
-                  {shortPath(d)}
-                </Text>
-              </Box>
-            </Box>
-          ))}
-        </Box>
-      </Box>
-    )
-
     // ---- vault: what was read, by folder; what the last reply used is
     // drawn bright, the rest dim.
     const tokensOf = new Map<string, number>()
@@ -759,32 +710,215 @@ export const register: Register = on => {
     }))
     const focused = await read($, focus)
 
+    // ---- the chosen view's drawing
+    const storedView = await read($, view)
+    const chosenView = VIEWS.some(v => v.id === storedView) ? storedView : 'map'
+    // The pane's width in cells of its code font, about 8 pixels each: a wider
+    // pane draws bigger, the text the same size.
+    const drawWidth = e.props.bodyColumns * 8.2
+    let viewSource = ''
+    let viewAlt = ''
+    if (chosenView === 'share') {
+      viewAlt = 'Donut of the vault tokens loaded, by folder'
+      viewSource = shareSvg(
+        groupRows
+          .filter(g => g.tokens > 0)
+          .map(g => ({ name: g.name, tokens: g.tokens, area: areaOfGroup(g.name), isUsed: g.isUsed })),
+        drawWidth,
+      )
+    } else if (chosenView === 'timeline') {
+      viewAlt = 'Vault notes read in each turn, stacked by tokens'
+      const seenAt = new Map<string, number>()
+      const perTurn = new Map<string, { path: string; turn: number; tokens: number; isRepeat: boolean }>()
+      for (const r of [...vault].sort((a, b) => a.turn - b.turn)) {
+        if (isFolder(r.path)) continue
+        const key = `${r.turn}|${r.path}`
+        if (perTurn.has(key)) continue
+        const firstTurn = seenAt.get(r.path)
+        if (firstTurn === undefined) seenAt.set(r.path, r.turn)
+        perTurn.set(key, {
+          path: r.path,
+          turn: r.turn,
+          tokens: tokensOf.get(r.path) ?? 0,
+          isRepeat: firstTurn !== undefined && firstTurn < r.turn,
+        })
+      }
+      viewSource = timelineSvg([...perTurn.values()], Math.max(promptCount, 1), drawWidth)
+    } else if (chosenView === 'treemap') {
+      viewAlt = 'Vault notes loaded as rectangles sized by tokens, grouped by area'
+      viewSource = treemapSvg(
+        graphNodes.map(n => ({ path: n.path, tokens: n.tokens, isLatest: n.turn === promptCount })),
+        drawWidth,
+      )
+    } else if (chosenView === 'map') {
+      viewAlt = `Graph of the ${files.length} vault notes read this session, sized by tokens, with the notes they link to`
+      viewSource = graphSvg({
+        used: graphNodes,
+        latestTurn: promptCount,
+        focus: focused,
+        index: vaultIndex,
+        width: drawWidth,
+      })
+    }
+    const gapList = chosenView === 'gaps' ? gaps(graphNodes, vaultIndex, 15) : []
+    const gapRows =
+      chosenView !== 'gaps' ? null : !vaultIndex ? (
+        <Text dimColor>Reading the vault's links…</Text>
+      ) : gapList.length === 0 ? (
+        <Text dimColor>Every linked note is loaded</Text>
+      ) : (
+        <Box flexDirection="column">
+          <Box justifyContent="space-between" gap={1}>
+            <Text dimColor>Linked from loaded notes</Text>
+            <Text dimColor>Links</Text>
+          </Box>
+          {gapList.map(g => (
+            <Box key={`gap-${g.path}`} flexDirection="column" hover={{ scope: `gap-${g.path}` }}>
+              <Box justifyContent="space-between" gap={1}>
+                <Text>{noteName(g.path)}</Text>
+                <Text tabular>{String(g.sources.length)}</Text>
+              </Box>
+              <Box display="none" hover={{ scope: `gap-${g.path}`, display: 'flex' }} paddingLeft={2}>
+                <Text dimColor>
+                  {`${groupOf(g.path)} · ${tokens(g.tokens)} · from ${g.sources.map(noteName).join(', ')}`}
+                </Text>
+              </Box>
+            </Box>
+          ))}
+        </Box>
+      )
+
+    // ---- context, coloured by what fills it
+    const ctx = sum.context
+    // The vault's notes arrive as tool results, so they sit inside Messages:
+    // shown as their own part, taken out of Messages, never more than it holds.
+    const messageTokens = ctx?.parts.find(p => p.name === 'Messages')?.tokens ?? 0
+    const vaultInContext = Math.min(vaultTokens, messageTokens)
+    const ctxParts = (ctx?.parts ?? []).flatMap(part =>
+      part.name === 'Messages' && vaultInContext > 0
+        ? [
+            { ...part, tokens: part.tokens - vaultInContext },
+            { name: VAULT_NAME, tokens: vaultInContext, kind: 'used' },
+          ]
+        : [part],
+    )
+    const context = ctx && ctx.percent !== undefined && (
+      <Box flexDirection="column" gap={1}>
+        {heading('Context')}
+        <Box flexDirection="column">
+          {disclosure(
+            'context',
+            `${ctx.percent}% used`,
+            `${tokens(ctx.tokens ?? 0)} / ${tokens(ctx.window)}`,
+          )}
+          {bar(
+            'bar-context',
+            `Context: ${ctx.percent}% used`,
+            ctxParts.map(part => ({ share: part.tokens / ctx.window, color: partColor(part.name) })),
+          )}
+          {vaultInContext > 0 && (
+            <Box justifyContent="space-between" gap={1}>
+              <Text>
+                <Text color={partColor(VAULT_NAME)}>■ </Text>
+                {VAULT_NAME}
+              </Text>
+              <Text tabular>
+                {`${Math.round((vaultInContext / ctx.window) * 100)}% · ${tokens(vaultInContext)}`}
+              </Text>
+            </Box>
+          )}
+          {isOpen('context') &&
+            ctxParts.map(part => (
+              <Box key={`c-${part.name}`} justifyContent="space-between" gap={1} paddingLeft={2}>
+                <Text>
+                  <Text color={partColor(part.name)}>■ </Text>
+                  <Text dimColor>{part.name}</Text>
+                </Text>
+                <Text dimColor tabular>
+                  {tokens(part.tokens)}
+                </Text>
+              </Box>
+            ))}
+        </Box>
+      </Box>
+    )
+
+    // ---- folders: a name with a folder mark; the path shows on hover,
+    // and a press opens the folder.
+    const folderList = (
+      <Box flexDirection="column" gap={1}>
+        {heading('Folders')}
+        <Box flexDirection="column">
+          {dirs.map((d, i) => (
+            <Box key={`d-${i}`} flexDirection="column" hover={{ scope: `dir-${i}` }}>
+              <Box gap={1} alignItems="center">
+                {Svg ? (
+                  <Svg alt="Folder" width={16} height={16} source={FOLDER_ICON} />
+                ) : (
+                  <Text dimColor>▸</Text>
+                )}
+                <Button
+                  key={`open-${i}`}
+                  plain
+                  hover={{ scope: `dir-${i}`, underline: true }}
+                  onPress={() => openFolder($, d)}
+                >
+                  {d.split('/').filter(Boolean).pop() ?? d}
+                </Button>
+              </Box>
+              <Box display="none" hover={{ scope: `dir-${i}`, display: 'flex' }} paddingLeft={3}>
+                <Text dimColor wrap="truncate-start">
+                  {shortPath(d)}
+                </Text>
+              </Box>
+            </Box>
+          ))}
+          {isMissing && (
+            <Box gap={1} alignItems="center">
+              {Svg ? (
+                <Svg alt="Missing folder" width={16} height={16} source={FOLDER_MISSING_ICON} />
+              ) : (
+                <Text color="warning">✕</Text>
+              )}
+              <Text color="warning">{VAULT_NAME} not added</Text>
+            </Box>
+          )}
+        </Box>
+      </Box>
+    )
+
     const vaultBody = isMissing ? (
-      <Text color="warning">Not loaded in this session</Text>
+      <Text dimColor>Nothing read yet</Text>
     ) : vault.length === 0 ? (
       <Text dimColor>Added, nothing read yet</Text>
     ) : (
       <Box flexDirection="column" gap={1}>
         {row(
           `${files.length} ${files.length === 1 ? 'file' : 'files'} read`,
-          vaultTokens > 0 ? `about ${tokens(vaultTokens)} tokens` : '',
+          vaultTokens > 0 ? tokens(vaultTokens) : '',
         )}
-        {Svg && (
-          <Svg
-            key="graph"
-            isInteractive
-            alt={`Graph of the ${files.length} vault notes read this session, sized by tokens, with the notes they link to`}
-            source={graphSvg({
-              used: graphNodes,
-              latestTurn: promptCount,
-              focus: focused,
-              index: vaultIndex,
-              // The pane's width in cells of its code font, about 8 pixels each:
-              // a wider pane draws a bigger graph, the text the same size.
-              width: e.props.bodyColumns * 8.2,
-            })}
-          />
-        )}
+        <Box gap={2} flexWrap="wrap">
+          {VIEWS.map(v => (
+            <Button
+              key={`view:${v.id}`}
+              plain
+              dimColor={chosenView !== v.id}
+              onPress={() => update($, view, () => v.id)}
+            >
+              {chosenView === v.id ? <Text weight="medium">{v.label}</Text> : v.label}
+            </Button>
+          ))}
+        </Box>
+        {chosenView === 'gaps'
+          ? gapRows
+          : Svg && (
+              <Svg
+                key={`view-${chosenView}`}
+                isInteractive
+                alt={viewAlt}
+                source={viewSource}
+              />
+            )}
         <Box flexDirection="column" gap={1}>
           {groupRows.map(g => {
             const share = vaultTokens > 0 ? g.tokens / vaultTokens : 0

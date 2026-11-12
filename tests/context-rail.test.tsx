@@ -98,18 +98,18 @@ test('the pane shows cost, limits, context and the vault file read', async ($, o
     expect((await reply.find({ type: 'Text', text: /Turn 1/ }))?.text).toBe(
       'Turn 1: $0.25 · 75% of input from cache',
     )
-    expect((await reply.find({ type: 'Text', text: /Context vault/ }))?.text).toBe(
-      'Context vault: ui-rules',
+    expect((await reply.find({ type: 'Text', text: /Obsidian vault/ }))?.text).toBe(
+      'Obsidian vault: ui-rules',
     )
     await reply.unmount()
   }
 })
 
-test('with no vault read, the vault shows as not loaded', async ($, on) => {
+test('with no vault read or added, Folders warns it is missing', async ($, on) => {
   engine(on, { usd: 0 })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /Not loaded/ }))?.text).toBe(
-    'Not loaded in this session',
+  expect((await ui.find({ type: 'Text', text: /not added/ }))?.text).toBe(
+    'Obsidian vault not added',
   )
   await ui.unmount()
 })
@@ -184,4 +184,23 @@ test('the graph draws loaded notes, their links, and linked notes not loaded', a
   expect(source).toContain('writing-rules: linked, not loaded')
   expect(source).toContain('<line')
   await again.unmount()
+})
+
+test('each view draws, and the vault shows as its own part of the context', async ($, on) => {
+  const cost = { usd: 0 }
+  engine(on, cost)
+  await oneTurn($, cost)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const text = async (re: RegExp) => (await ui.find({ type: 'Text', text: re }))?.text
+  // 4000 characters read: about 1.0k tokens, all of it inside Messages.
+  expect(await text(/^0% · 1\.0k$/)).toBe('0% · 1.0k')
+  for (const id of ['share', 'timeline', 'treemap']) {
+    await ui.press({ key: `view:${id}` })
+    const svgs = await ui.findAll({ type: 'Svg' } as never)
+    expect(svgs.some((g: any) => /ui-rules|about-me/.test(String(g?.props?.source ?? '')))).toBe(true)
+  }
+  await ui.press({ key: 'view:gaps' })
+  expect(await text(/Reading the vault|Every linked note|Linked from/)).toBeDefined()
+  await ui.press({ key: 'view:map' })
+  await ui.unmount()
 })
