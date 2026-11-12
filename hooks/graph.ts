@@ -76,7 +76,7 @@ function frameFor(width = 480): Frame {
   const w = Math.max(260, Math.min(1400, Math.round(width)))
   const height = Math.max(240, Math.min(820, Math.round(w * 0.82)))
   // Room for the area names: a column each side, a line top and bottom.
-  const rim = Math.max(80, Math.min(w / 2 - 74, height / 2 - 22))
+  const rim = Math.max(80, Math.min(w / 2 - 58, height / 2 - 20))
   return { width: w, height, cx: w / 2, cy: height / 2, rim, scale: Math.max(0.8, Math.min(1.8, rim / 168)) }
 }
 
@@ -123,10 +123,10 @@ function tipLayer(tips: Tip[], width: number, height: number): string {
   const style = `<style>.tip{opacity:0;pointer-events:none;transition:opacity .08s}[id^="i-"]{cursor:default}[id^="i-"]:hover{stroke:#ffffff;stroke-width:1.5;stroke-opacity:.9}${rules}</style>`
   const labels = tips
     .map(t => {
-      const w = t.text.length * 6.7 + 16
+      const w = t.text.length * 7.3 + 18
       const x = Math.max(4, Math.min(width - w - 4, t.x - w / 2))
       const y = Math.max(4, Math.min(height - 26, t.y - 11))
-      return `<g class="tip" id="t-${t.id}"><rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="22" rx="6" fill="#111111" fill-opacity="0.92" stroke="#ffffff" stroke-opacity="0.15"/><text x="${(x + 8).toFixed(1)}" y="${(y + 15).toFixed(1)}" font-size="12" fill="#f2f2f2">${escape(t.text)}</text></g>`
+      return `<g class="tip" id="t-${t.id}"><rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="24" rx="6" fill="#111111" fill-opacity="0.92" stroke="#ffffff" stroke-opacity="0.15"/><text x="${(x + 9).toFixed(1)}" y="${(y + 16.5).toFixed(1)}" font-size="13" fill="#f2f2f2">${escape(t.text)}</text></g>`
     })
     .join('')
   return style + labels
@@ -198,7 +198,7 @@ export function graphSvg({ used, latestTurn, focus, index, width }: GraphInput):
       const w = label.length * 7.2
       const x0 = anchor === 'start' ? x : anchor === 'end' ? x - w : x - w / 2
       rimBoxes.push({ x0, x1: x0 + w, y0: y - 12, y1: y + 3 })
-      return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="${anchor}" font-size="13" fill="${areaColor(area)}" fill-opacity="${isPresent ? 0.95 : 0.35}">${area === 'root' ? 'vault root' : area}</text>`
+      return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="${anchor}" font-size="12.5" fill="${areaColor(area)}" fill-opacity="${isPresent ? 0.95 : 0.35}">${area === 'root' ? 'vault root' : area}</text>`
     })
     .join('')
 
@@ -212,10 +212,6 @@ export function graphSvg({ used, latestTurn, focus, index, width }: GraphInput):
       const cx = n.x.toFixed(1)
       const cy = n.y.toFixed(1)
       const r = radius(n)
-      const tip =
-        n.turn === 0
-          ? `${noteName(n.path)}: linked, not loaded`
-          : `${noteName(n.path)}: ${k(n.tokens)} tokens, read in turn ${n.turn}${isNow ? ' (latest)' : ''}`
       // A soft halo marks what the latest turn used.
       const halo = isNow
         ? `<circle cx="${cx}" cy="${cy}" r="${(r + 5 * f.scale).toFixed(1)}" fill="${color}" fill-opacity="0.22"/>`
@@ -228,7 +224,7 @@ export function graphSvg({ used, latestTurn, focus, index, width }: GraphInput):
         y: n.y - r - 14,
         text: n.turn === 0 ? `${noteName(n.path)} · not loaded` : `${noteName(n.path)} · ${k(n.tokens)}`,
       })
-      return `<g><title>${escape(tip)}</title>${halo}<circle id="i-${id}" cx="${cx}" cy="${cy}" r="${r.toFixed(1)}" fill="${color}" fill-opacity="${opacity(n)}"${ring}/></g>`
+      return `<g>${halo}<circle id="i-${id}" cx="${cx}" cy="${cy}" r="${r.toFixed(1)}" fill="${color}" fill-opacity="${opacity(n)}"${ring}/></g>`
     })
     .join('')
 
@@ -253,7 +249,7 @@ export function graphSvg({ used, latestTurn, focus, index, width }: GraphInput):
     .sort((a, b) => (b.path === focus ? 1 : 0) - (a.path === focus ? 1 : 0) || b.tokens - a.tokens)
     .flatMap(n => {
       const name = noteName(n.path)
-      const w = name.length * 6.2
+      const w = name.length * 6.9
       const r = radius(n)
       // Under, over, right of, then left of the node.
       const spots = [
@@ -274,13 +270,13 @@ export function graphSvg({ used, latestTurn, focus, index, width }: GraphInput):
       placed.push(spot.box)
       return [
         n.turn === latestTurn || n.path === focus
-          ? `<text x="${spot.x.toFixed(1)}" y="${spot.y.toFixed(1)}" text-anchor="${spot.anchor}" font-size="11.5" font-weight="600" fill="#e6e6e6">${escape(name)}</text>`
-          : `<text x="${spot.x.toFixed(1)}" y="${spot.y.toFixed(1)}" text-anchor="${spot.anchor}" font-size="11" fill="#8a8a8a" fill-opacity="0.8">${escape(name)}</text>`,
+          ? `<text x="${spot.x.toFixed(1)}" y="${spot.y.toFixed(1)}" text-anchor="${spot.anchor}" font-size="12.5" font-weight="600" fill="#e6e6e6">${escape(name)}</text>`
+          : `<text x="${spot.x.toFixed(1)}" y="${spot.y.toFixed(1)}" text-anchor="${spot.anchor}" font-size="12" fill="#8a8a8a" fill-opacity="0.8">${escape(name)}</text>`,
       ]
     })
     .join('')
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${f.width}" height="${f.height}" viewBox="0 0 ${f.width} ${f.height}" font-family="-apple-system, system-ui, sans-serif">${edges.join('')}${circles}${labels}${rim}${tipLayer(mapTips, f.width, f.height)}</svg>`
+  return `${svgOpen(f.width, f.height)}${edges.join('')}${circles}${labels}${rim}${tipLayer(mapTips, f.width, f.height)}</svg>`
 }
 
 // ---------------------------------------------------------------- other views
@@ -301,8 +297,13 @@ export function gaps(used: GraphNode[], index: VaultIndex | null, limit = 40) {
     .slice(0, limit)
 }
 
+/**
+ * Opens a chart drawn at `w` by `h` design units. Its own size is ten times
+ * that, so the pane caps it to its width and scales the height to match: the
+ * chart always fills the rail, and grows with it.
+ */
 const svgOpen = (w: number, h: number) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" font-family="-apple-system, system-ui, sans-serif">`
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${w * 10}" height="${h * 10}" viewBox="0 0 ${w} ${h}" font-family="-apple-system, system-ui, sans-serif">`
 const clampWidth = (width = 380) => Math.max(260, Math.min(1400, Math.round(width)))
 
 /** A colour lightened toward white by `amount` (0 to 1). */
@@ -333,12 +334,12 @@ export function shareSvg(groups: ShareGroup[], width?: number): string {
       return [g.name, lighten(areaColor(g.area), Math.min(0.6, i * 0.3))]
     }),
   )
-  const size = Math.min(w - 40, 300)
+  const size = Math.min(w - 60, 300)
   const r = size / 2
   const inner = r * 0.62
   const cx = w / 2
   const cy = r + 10
-  const rowH = 20
+  const rowH = 24
   const legendTop = cy + r + 22
   const h = legendTop + groups.length * rowH + 6
   let angle = -Math.PI / 2
@@ -359,17 +360,17 @@ export function shareSvg(groups: ShareGroup[], width?: number): string {
       const pct = Math.round((g.tokens / total) * 100)
       const id = `s${shareTips.length}`
       shareTips.push({ id, x: cx, y: cy, text: `${g.name} · ${pct}% · ${k(g.tokens)}` })
-      return `<path id="i-${id}" d="${d}" fill="${colorOf.get(g.name) ?? areaColor(g.area)}" fill-opacity="${g.isUsed ? 1 : 0.35}"><title>${escape(`${g.name}: ${k(g.tokens)} tokens, ${pct}%`)}</title></path>`
+      return `<path id="i-${id}" d="${d}" fill="${colorOf.get(g.name) ?? areaColor(g.area)}" fill-opacity="${g.isUsed ? 1 : 0.35}"></path>`
     })
     .join('')
-  const center = `<text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="22" font-weight="600" fill="#e6e6e6">${k(total)}</text><text x="${cx}" y="${cy + 18}" text-anchor="middle" font-size="12" fill="#8a8a8a">tokens loaded</text>`
+  const center = `<text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="26" font-weight="600" fill="#e6e6e6">${k(total)}</text><text x="${cx}" y="${cy + 20}" text-anchor="middle" font-size="13" fill="#8a8a8a">tokens loaded</text>`
   // A key under the donut: colour, folder, share. Data-surface text.
   const legend = groups
     .map((g, i) => {
       const y = legendTop + i * rowH
       const pct = total > 0 ? Math.round((g.tokens / total) * 100) : 0
       const fill = g.isUsed ? '#e6e6e6' : '#8a8a8a'
-      return `<rect x="16" y="${y - 9}" width="10" height="10" rx="2" fill="${colorOf.get(g.name) ?? areaColor(g.area)}" fill-opacity="${g.isUsed ? 1 : 0.35}"/><text x="34" y="${y}" font-size="12" fill="${fill}">${escape(g.name)}</text><text x="${w - 16}" y="${y}" text-anchor="end" font-size="12" fill="${fill}">${pct}%</text>`
+      return `<rect x="12" y="${y - 11}" width="12" height="12" rx="3" fill="${colorOf.get(g.name) ?? areaColor(g.area)}" fill-opacity="${g.isUsed ? 1 : 0.35}"/><text x="32" y="${y}" font-size="14" fill="${fill}">${escape(g.name)}</text><text x="${w - 12}" y="${y}" text-anchor="end" font-size="14" fill="${fill}">${pct}%</text>`
     })
     .join('')
   return `${svgOpen(w, h)}${arcs}${center}${legend}${tipLayer(shareTips, w, h)}</svg>`
@@ -400,7 +401,6 @@ export function timelineSvg(reads: TimelineRead[], latestTurn: number, width?: n
         .map(r => {
           const hh = Math.max(2, (r.tokens / max) * (base - top))
           y -= hh
-          const tip = `${noteName(r.path)}: ${k(r.tokens)} tokens, turn ${t}${r.isRepeat ? ', read again' : ''}`
           const id = `l${timeTips.length}`
           timeTips.push({
             id,
@@ -408,12 +408,12 @@ export function timelineSvg(reads: TimelineRead[], latestTurn: number, width?: n
             y: y + hh / 2,
             text: `${noteName(r.path)} · ${k(r.tokens)}${r.isRepeat ? ' · read again' : ''}`,
           })
-          return `<rect id="i-${id}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(hh - 1).toFixed(1)}" rx="2" fill="${areaColor(areaOf(r.path))}" fill-opacity="${isNow ? 1 : 0.4}"${r.isRepeat ? ' stroke="#e6e6e6" stroke-dasharray="3 2" stroke-width="1"' : ''}><title>${escape(tip)}</title></rect>`
+          return `<rect id="i-${id}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(hh - 1).toFixed(1)}" rx="2" fill="${areaColor(areaOf(r.path))}" fill-opacity="${isNow ? 1 : 0.4}"${r.isRepeat ? ' stroke="#e6e6e6" stroke-dasharray="3 2" stroke-width="1"' : ''}></rect>`
         })
         .join('')
       const total = totals[i] ?? 0
-      const head = total > 0 ? `<text x="${(x + barW / 2).toFixed(1)}" y="${(y - 6).toFixed(1)}" text-anchor="middle" font-size="11" fill="${isNow ? '#e6e6e6' : '#8a8a8a'}">${k(total)}</text>` : ''
-      const foot = `<text x="${(x + barW / 2).toFixed(1)}" y="${base + 16}" text-anchor="middle" font-size="12" fill="${isNow ? '#e6e6e6' : '#8a8a8a'}"${isNow ? ' font-weight="600"' : ''}>${t}</text>`
+      const head = total > 0 ? `<text x="${(x + barW / 2).toFixed(1)}" y="${(y - 6).toFixed(1)}" text-anchor="middle" font-size="12.5" fill="${isNow ? '#e6e6e6' : '#8a8a8a'}">${k(total)}</text>` : ''
+      const foot = `<text x="${(x + barW / 2).toFixed(1)}" y="${base + 16}" text-anchor="middle" font-size="13" fill="${isNow ? '#e6e6e6' : '#8a8a8a'}"${isNow ? ' font-weight="600"' : ''}>${t}</text>`
       return segs + head + foot
     })
     .join('')
@@ -458,14 +458,14 @@ export function treemapSvg(notes: TreemapNote[], width?: number): string {
       return notesIn
         .map(([n, c]) => {
           const full = noteName(n.path)
-          const chars = Math.floor((c.w - 14) / 6.6)
+          const chars = Math.floor((c.w - 14) / 7.3)
           const fitsName = chars >= 4 && c.h > 20
           const name = fit(full, chars)
           const fitsSize = fitsName && c.h > 38
           const fill = n.isLatest ? '#f2f2f2' : '#cfcfcf'
           const id = `r${treeTips.length}`
           treeTips.push({ id, x: c.x + c.w / 2, y: c.y + c.h / 2, text: `${full} · ${k(n.tokens)}` })
-          return `<g><title>${escape(`${full}: ${k(n.tokens)} tokens`)}</title><rect id="i-${id}" x="${(c.x + 1).toFixed(1)}" y="${(c.y + 1).toFixed(1)}" width="${Math.max(0, c.w - 2).toFixed(1)}" height="${Math.max(0, c.h - 2).toFixed(1)}" rx="3" fill="${areaColor(a.area)}" fill-opacity="${n.isLatest ? 0.9 : 0.35}"/>${fitsName ? `<text x="${(c.x + 7).toFixed(1)}" y="${(c.y + 16).toFixed(1)}" font-size="12" fill="${fill}"${n.isLatest ? ' font-weight="600"' : ''}>${escape(name)}</text>` : ''}${fitsSize ? `<text x="${(c.x + 7).toFixed(1)}" y="${(c.y + 31).toFixed(1)}" font-size="11" fill="${fill}" fill-opacity="0.8">${k(n.tokens)}</text>` : ''}</g>`
+          return `<g><rect id="i-${id}" x="${(c.x + 1).toFixed(1)}" y="${(c.y + 1).toFixed(1)}" width="${Math.max(0, c.w - 2).toFixed(1)}" height="${Math.max(0, c.h - 2).toFixed(1)}" rx="3" fill="${areaColor(a.area)}" fill-opacity="${n.isLatest ? 0.9 : 0.35}"/>${fitsName ? `<text x="${(c.x + 7).toFixed(1)}" y="${(c.y + 16).toFixed(1)}" font-size="13" fill="${fill}"${n.isLatest ? ' font-weight="600"' : ''}>${escape(name)}</text>` : ''}${fitsSize ? `<text x="${(c.x + 7).toFixed(1)}" y="${(c.y + 31).toFixed(1)}" font-size="12" fill="${fill}" fill-opacity="0.8">${k(n.tokens)}</text>` : ''}</g>`
         })
         .join('')
     })

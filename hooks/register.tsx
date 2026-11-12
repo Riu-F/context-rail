@@ -714,9 +714,9 @@ export const register: Register = on => {
     // ---- the chosen view's drawing
     const storedView = await read($, view)
     const chosenView = VIEWS.some(v => v.id === storedView) ? storedView : 'map'
-    // The pane's width in cells of its code font, about 8 pixels each: a wider
-    // pane draws bigger, the text the same size.
-    const drawWidth = e.props.bodyColumns * 8.2
+    // Every chart is drawn at one design width and scales to fill the pane,
+    // so a wider rail draws a bigger chart, its text included.
+    const drawWidth = 360
     let viewSource = ''
     let viewAlt = ''
     if (chosenView === 'share') {
@@ -893,7 +893,6 @@ export const register: Register = on => {
               <Button
                 key={`view:${v.id}`}
                 plain
-                label={v.label}
                 dimColor={chosenView !== v.id}
                 hover={{ scope: `view-${v.id}`, dimColor: false }}
                 onPress={() => update($, view, () => v.id)}
