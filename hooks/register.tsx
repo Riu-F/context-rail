@@ -11,7 +11,33 @@ const TITLE = 'Session'
 // The vault every session should have. Matched anywhere in a path, so it
 // holds on any machine where the vault sits on the Desktop.
 const VAULT_NAME = 'Obsidian vault'
-const VAULT_PATH = /(?:~|\/Users\/[^/\s"'`]+)\/Desktop\/claude-context(\/[^\s"'`;|&)<>]*)?/g
+
+// The vault this session tracks: the vaultPath setting, or the first folder
+// the session uses that sits inside a vault (a folder holding `.obsidian`).
+let vaultRootPath: string | null = null
+let vaultMatcher: RegExp | null = null
+let homeDir = ''
+// The vaultPath setting, as the module was loaded with it.
+let configuredVault = ''
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** Sets the vault and the pattern that finds its paths in any text. */
+function setVaultRoot(root: string | null) {
+  vaultRootPath = root ? root.replace(/\/+$/, '') : null
+  if (!vaultRootPath) {
+    vaultMatcher = null
+    return
+  }
+  const forms = [escapeRegExp(vaultRootPath)]
+  if (homeDir && vaultRootPath.startsWith(`${homeDir}/`)) {
+    forms.push(`~${escapeRegExp(vaultRootPath.slice(homeDir.length))}`)
+  }
+  // The vault's path, then either the end of the path or a path inside it.
+  vaultMatcher = new RegExp(`(?:${forms.join('|')})(?=$|[/\\s"'\`;|&)<>])(/[^\\s"'\`;|&)<>]*)?`, 'g')
+}
 
 // Change a shape tag when that value's fields change: it declines what an
 // earlier version stored, which outlives a reload.
@@ -33,6 +59,9 @@ const open = atom({ plugin: 'context-rail', key: 'open' } as const, [], {
 // The note picked in the vault list, ringed in the graph.
 const focus = atom({ plugin: 'context-rail', key: 'focus' } as const, null)
 // Bumped when the vault index is built, so the pane redraws with the links.
+// The vault found this session, kept across reloads of the mod.
+const knownVault = atom({ plugin: 'context-rail', key: 'knownVault' } as const, null)
+
 // Which drawing the vault section shows.
 const view = atom({ plugin: 'context-rail', key: 'view' } as const, 'map')
 // Buttons hold text, so each view's icon is a symbol of the system font.
@@ -207,25 +236,24 @@ function areaOfGroup(group: string): string {
   return group === 'Vault root' ? 'root' : (group.split('/')[0] ?? 'root')
 }
 
+/**
+ * The vault folder a note is grouped under: the vault's root, a top folder,
+ * or, for a note two or more folders deep, its top two folders.
+ */
 function groupOf(path: string): string {
   const parts = path.split('/').filter(p => p !== '' && p !== '.')
   const depth = isFolder(path) ? parts.length : parts.length - 1
   if (depth <= 0) return 'Vault root'
-  const [top, second, third] = parts
-  // work/projects/<name>/… and personal/projects/<name>/… group by project.
-  if ((top === 'work' || top === 'personal') && second === 'projects' && depth >= 3 && third) {
-    return `${top}/projects/${third}`
-  }
-  if ((top === 'work' || top === 'personal') && depth >= 2 && second) {
-    return `${top}/${second}`
-  }
+  const [top, second] = parts
+  if (depth >= 2 && second) return `${top}/${second}`
   return top ?? 'Vault root'
 }
 
 /** Every vault path named in a text, relative to the vault root. */
 function vaultPaths(text: string): string[] {
   const found = new Set<string>()
-  for (const match of text.matchAll(VAULT_PATH)) {
+  if (!vaultMatcher) return []
+  for (const match of text.matchAll(vaultMatcher)) {
     const rest = (match[1] ?? '/').replace(/^\//, '')
     found.add(rest === '' ? './' : rest)
   }
@@ -272,10 +300,63 @@ async function refreshTotals($: EngineInterface): Promise<Totals> {
   return next
 }
 
-/** The vault's absolute path, from the home folder the working directory sits in. */
-function vaultRoot(cwd: string): string | null {
-  const home = /^\/Users\/[^/]+/.exec(cwd)?.[0]
-  return home ? `${home}/Desktop/claude-context` : null
+// Folders already checked for `.obsidian`, so each is asked once.
+const checkedForVault = new Set<string>()
+
+/** The vault a path sits in: its nearest folder, or folder above, holding `.obsidian`. */
+async function vaultAround($: EngineInterface, path: string): Promise<string | null> {
+  const parts = path.replace(/^~(?=\/)/, homeDir).split('/')
+  for (let n = parts.length; n > 1; n--) {
+    const dir = parts.slice(0, n).join('/')
+    if (!dir.startsWith('/') || checkedForVault.has(dir)) continue
+    checkedForVault.add(dir)
+    try {
+      if (await $.fs.exists(`${dir}/.obsidian`)) return dir
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
+/** Learns the home folder and applies the vaultPath setting, once. */
+async function ensureVault($: EngineInterface) {
+  if (!homeDir) homeDir = (await $.env.get('HOME')) ?? ''
+  if (!vaultRootPath && configuredVault) {
+    setVaultRoot(configuredVault.replace(/^~(?=\/|$)/, homeDir))
+  }
+}
+
+/** Finds the vault from the paths in a text, while none is known yet. */
+async function findVaultIn($: EngineInterface, text: string) {
+  await ensureVault($)
+  if (vaultRootPath) return
+  for (const m of text.matchAll(/(?:~|\/)[^\s"'`;|&)<>]*/g)) {
+    const found = await vaultAround($, m[0])
+    if (found) {
+      setVaultRoot(found)
+      await update($, knownVault, () => found)
+      return
+    }
+  }
+}
+
+/** The folders, below the vault, that the index leaves out. */
+async function ignoredFolders($: EngineInterface, root: string): Promise<string[]> {
+  const ignored: string[] = []
+  try {
+    const app = JSON.parse(await $.fs.read(`${root}/.obsidian/app.json`)) as { userIgnoreFilters?: string[] }
+    ignored.push(...(app.userIgnoreFilters ?? []))
+  } catch {
+    // No ignore list.
+  }
+  try {
+    const templates = JSON.parse(await $.fs.read(`${root}/.obsidian/templates.json`)) as { folder?: string }
+    if (templates.folder) ignored.push(templates.folder)
+  } catch {
+    // No templates folder set.
+  }
+  return ignored.map(f => f.replace(/^\/+|\/+$/g, '')).filter(Boolean)
 }
 
 async function buildIndex($: EngineInterface, root: string) {
@@ -283,11 +364,15 @@ async function buildIndex($: EngineInterface, root: string) {
   isIndexing = true
   try {
     const notes: { path: string; text: string }[] = []
+    const ignored = await ignoredFolders($, root)
     const walk = async (rel: string) => {
       const entries = await $.fs.list(rel ? `${root}/${rel}` : root)
       for (const entry of entries) {
+        // Hidden folders, `_` system folders, and what the vault's own
+        // settings tell Obsidian to leave out.
         if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue
         const path = rel ? `${rel}/${entry.name}` : entry.name
+        if (ignored.some(f => path === f || path.startsWith(`${f}/`))) continue
         if (entry.kind === 'dir') await walk(path)
         else if (entry.kind === 'file' && entry.name.endsWith('.md')) {
           notes.push({ path, text: await $.fs.read(`${root}/${path}`) })
@@ -359,7 +444,9 @@ async function openPane($: EngineInterface) {
 
 // ---------------------------------------------------------------- hooks
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  configuredVault = typeof options.vaultPath === 'string' ? options.vaultPath.trim() : ''
+
   // Per-turn working values, kept in the module: a reload mid-turn only
   // loses that turn's cost split.
   let costAtStart: number | undefined
@@ -367,6 +454,10 @@ export const register: Register = on => {
   let subagentRuns = 0
 
   on('session.start', async ($, e, next) => {
+    await ensureVault($)
+    const stored = await read($, knownVault)
+    if (!vaultRootPath && stored) setVaultRoot(stored)
+    await findVaultIn($, e.cwd)
     await $.command.register({
       name: 'context-rail',
       description: 'Open the Session pane: costs, limits, context, folders and vault reads',
@@ -393,11 +484,13 @@ export const register: Register = on => {
   on('classic.DirectoryAdded', async ($, e, next) => {
     const dir = e.directory
     await update($, folders, list => (list.includes(dir) ? list : [...list, dir]))
+    await findVaultIn($, dir)
     await noteVault($, vaultPaths(dir), 'mention', 0)
     return next(e)
   })
 
   on('prompt.submit', async ($, e, next) => {
+    await findVaultIn($, e.text)
     // An @-mention of a vault file or folder.
     const mentioned = [...e.text.matchAll(/@"?([^\s"]+)"?/g)].flatMap(m =>
       vaultPaths(m[1] ?? ''),
@@ -416,6 +509,7 @@ export const register: Register = on => {
       return typeof value === 'string' ? value : ''
     }
     const size = ran.text?.length ?? 0
+    await findVaultIn($, `${field('file_path')} ${field('notebook_path')} ${field('path')} ${field('command')}`)
 
     if (e.tool === 'Read') {
       await noteVault($, vaultPaths(field('file_path')), 'read', size)
@@ -713,7 +807,8 @@ export const register: Register = on => {
 
     // ---- the graph's data: each note read, at its size and latest turn
     await read($, indexStamp)
-    const root = vaultRoot(cwd)
+    await ensureVault($)
+    const root = vaultRootPath
     if (Svg && root && vault.length > 0 && !vaultIndex) void buildIndex($, root)
     const lastTurnOf = new Map<string, number>()
     for (const r of vault) {
@@ -897,7 +992,7 @@ export const register: Register = on => {
               ) : (
                 <Text color="warning">✕</Text>
               )}
-              <Text color="warning">{VAULT_NAME} not added</Text>
+              <Text color="warning">{root ? `${VAULT_NAME} not added` : `No ${VAULT_NAME} in this session`}</Text>
             </Box>
           )}
         </Box>

@@ -52,6 +52,7 @@ declare module 'claude-code' {
       focus: string | null
       indexStamp: number
       view: string
+      knownVault: string | null
     }
   }
 }

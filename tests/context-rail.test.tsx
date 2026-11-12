@@ -20,6 +20,9 @@ const VAULT = '/Users/someone/Desktop/claude-context'
 
 function engine(on: any, cost: { usd: number }) {
   on('clock.now', () => ({ value: 1_000 }))
+  on('env.get', () => ({ value: '/Users/someone' }))
+  // The fake vault is the one folder holding `.obsidian`.
+  on('fs.exists', (_: unknown, e: any) => ({ value: String(e.path ?? e) === `${VAULT}/.obsidian` }))
   on('session.cwd', () => ({ value: '/Users/someone/project' }))
   on('session.turns', () => ({ value: 1 }))
   on('session.usage', () => ({
@@ -107,7 +110,7 @@ test('the pane shows cost, limits, context and the vault file read', async ($, o
   }
 })
 
-test('with no vault read or added, Folders warns it is missing', async ($, on) => {
+test('with the vault set but not added or read, Folders warns it is missing', { options: { vaultPath: '/Users/someone/Desktop/claude-context' } }, async ($, on) => {
   engine(on, { usd: 0 })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect((await ui.find({ type: 'Text', text: /not added/ }))?.text).toBe(
@@ -225,4 +228,29 @@ test("notes take the vault's Obsidian colour groups, else their folder's", async
   // No group matches: the folder's palette colour, the same every time.
   expect(noteColor('recipes/soup.md')).toBe(noteColor('recipes/bread.md'))
   setColorRules([])
+})
+
+test('a vault anywhere is found by its .obsidian folder, and named by the setting', async ($, on) => {
+  engine(on, { usd: 0 })
+  // Before any vault path is touched there is no vault.
+  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /No Obsidian vault/ }))?.text).toBe(
+    'No Obsidian vault in this session',
+  )
+  await ui.unmount()
+  // Reading a note inside it finds the vault, and the read counts.
+  await $.tool.call({ tool: 'Read', file_path: `${VAULT}/notes/idea.md` })
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /files? read$/ }))?.text).toBe('1 file read')
+  await ui.unmount()
+})
+
+test('the vaultPath setting names a vault with no .obsidian lookup', { options: { vaultPath: '~/Documents/Brain' } }, async ($, on) => {
+  engine(on, { usd: 0 })
+  await $.tool.call({ tool: 'Read', file_path: '/Users/someone/Documents/Brain/journal/today.md' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /files? read$/ }))?.text).toBe('1 file read')
+  await ui.press({ key: 'g:journal' })
+  expect(await ui.find({ key: 'f:journal/today.md' } as never)).toBeDefined()
+  await ui.unmount()
 })
