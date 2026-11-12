@@ -20,7 +20,7 @@ I keep an Obsidian vault of notes about myself and my work, and Claude's answers
 Above the vault list are five charts, picked with the icon buttons over them. Hover any item in a chart for its name.
 
 - **Map:** the notes read, each in its top folder's slice of a circle at a spot fixed by its path, so the map keeps its shape. Size is tokens loaded, lines are the `[[links]]` between them, and faint dots are notes linked to them that were not loaded. Click a file in the list to ring it on the map.
-- **Share:** a donut of the tokens loaded, by folder.
+- **Share:** a donut of the tokens loaded, by folder, each folder split into its notes. Hover a segment for the note and its share.
 - **Timeline:** each turn's notes, stacked by size. A dashed outline marks a note read again.
 - **Treemap:** the notes as rectangles sized by tokens.
 - **Gaps:** the notes most linked to what was loaded but not loaded themselves.

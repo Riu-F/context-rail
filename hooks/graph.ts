@@ -368,7 +368,16 @@ function fit(name: string, chars: number): string {
   return name.length <= chars ? name : `${name.slice(0, Math.max(1, chars - 1))}…`
 }
 
-export type ShareGroup = { name: string; tokens: number; area: string; isUsed: boolean; color?: string }
+export type ShareFile = { name: string; tokens: number }
+export type ShareGroup = {
+  name: string
+  tokens: number
+  area: string
+  isUsed: boolean
+  color?: string
+  /** The notes the folder's slice is split into, each hoverable. */
+  files?: ShareFile[]
+}
 
 /** A donut of the tokens loaded by folder, the latest turn's folders at full strength. */
 export function shareSvg(groups: ShareGroup[], width?: number): string {
@@ -394,23 +403,43 @@ export function shareSvg(groups: ShareGroup[], width?: number): string {
   const h = legendTop + groups.length * rowH + 6
   let angle = -Math.PI / 2
   const shareTips: Tip[] = []
+  const p = (a: number, rad: number) => `${(cx + Math.cos(a) * rad).toFixed(1)} ${(cy + Math.sin(a) * rad).toFixed(1)}`
+  /** One ring segment from angle a0 to a1. */
+  const segment = (a0: number, a1: number) => {
+    if (a1 - a0 >= Math.PI * 2 - 0.02) {
+      return `M ${p(-Math.PI / 2, r)} A ${r} ${r} 0 1 1 ${p(Math.PI * 1.4999, r)} L ${p(Math.PI * 1.4999, inner)} A ${inner} ${inner} 0 1 0 ${p(-Math.PI / 2, inner)} Z`
+    }
+    const big = a1 - a0 > Math.PI ? 1 : 0
+    return `M ${p(a0, r)} A ${r} ${r} 0 ${big} 1 ${p(a1, r)} L ${p(a1, inner)} A ${inner} ${inner} 0 ${big} 0 ${p(a0, inner)} Z`
+  }
+  // Each folder's slice, split into its notes by a hairline in the page's
+  // colour; the gap between folders is wider.
   const arcs = groups
     .filter(g => g.tokens > 0)
     .map(g => {
       const sweep = (g.tokens / total) * Math.PI * 2
-      const a0 = angle
-      const a1 = angle + Math.max(0, sweep - 0.012)
+      const groupStart = angle
       angle += sweep
-      const big = a1 - a0 > Math.PI ? 1 : 0
-      const p = (a: number, rad: number) => `${(cx + Math.cos(a) * rad).toFixed(1)} ${(cy + Math.sin(a) * rad).toFixed(1)}`
-      const d =
-        sweep >= Math.PI * 2 - 0.02
-          ? `M ${p(-Math.PI / 2, r)} A ${r} ${r} 0 1 1 ${p(Math.PI * 1.4999, r)} L ${p(Math.PI * 1.4999, inner)} A ${inner} ${inner} 0 1 0 ${p(-Math.PI / 2, inner)} Z`
-          : `M ${p(a0, r)} A ${r} ${r} 0 ${big} 1 ${p(a1, r)} L ${p(a1, inner)} A ${inner} ${inner} 0 ${big} 0 ${p(a0, inner)} Z`
-      const pct = Math.round((g.tokens / total) * 100)
-      const id = `s${shareTips.length}`
-      shareTips.push({ id, x: cx, y: cy, text: `${g.name} · ${pct}% · ${k(g.tokens)}` })
-      return `<path id="i-${id}" d="${d}" fill="${colorOf.get(g.name) ?? areaColor(g.area)}" fill-opacity="${g.isUsed ? 1 : 0.35}"></path>`
+      const fill = colorOf.get(g.name) ?? areaColor(g.area)
+      const opacity = g.isUsed ? 1 : 0.35
+      const files = (g.files ?? []).filter(f => f.tokens > 0).sort((a, b) => b.tokens - a.tokens)
+      const parts = files.length > 0 ? files : [{ name: g.name, tokens: g.tokens }]
+      const partTotal = parts.reduce((n, f) => n + f.tokens, 0) || 1
+      const usable = Math.max(0, sweep - 0.012)
+      let at = groupStart
+      return parts
+        .map(f => {
+          const fileSweep = (f.tokens / partTotal) * usable
+          const a0 = at
+          const a1 = at + fileSweep
+          at = a1
+          const pct = Math.round((f.tokens / total) * 100)
+          const id = `s${shareTips.length}`
+          const label = files.length > 0 ? `${f.name} · ${g.name}` : g.name
+          shareTips.push({ id, x: cx, y: cy, text: `${label} · ${pct}% · ${k(f.tokens)}` })
+          return `<path id="i-${id}" d="${segment(a0, a1)}" fill="${fill}" fill-opacity="${opacity}" stroke="#1f1f1e" stroke-width="0.8" stroke-opacity="0.9"></path>`
+        })
+        .join('')
     })
     .join('')
   const center = `<text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="26" font-weight="600" fill="#e6e6e6">${k(total)}</text><text x="${cx}" y="${cy + 20}" text-anchor="middle" font-size="13" fill="#8a8a8a">tokens loaded</text>`

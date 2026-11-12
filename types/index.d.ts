@@ -53,6 +53,7 @@ declare module 'claude-code' {
       indexStamp: number
       view: string
       knownVault: string | null
+      isRebuilding: boolean
     }
   }
 }

@@ -59,6 +59,9 @@ const open = atom({ plugin: 'context-rail', key: 'open' } as const, [], {
 // The note picked in the vault list, ringed in the graph.
 const focus = atom({ plugin: 'context-rail', key: 'focus' } as const, null)
 // Bumped when the vault index is built, so the pane redraws with the links.
+// True while the pane is being rebuilt from the chat's transcript.
+const isRebuilding = atom({ plugin: 'context-rail', key: 'isRebuilding' } as const, false)
+
 // The vault found this session, kept across reloads of the mod.
 const knownVault = atom({ plugin: 'context-rail', key: 'knownVault' } as const, null)
 
@@ -498,6 +501,16 @@ async function rebuildSession($: EngineInterface) {
   if ((await read($, reads)).length > 0) return
   const file = await transcriptPath($)
   if (!file) return
+  await update($, isRebuilding, () => true)
+  try {
+    await rebuildFrom($, file)
+  } finally {
+    await update($, isRebuilding, () => false)
+  }
+}
+
+/** Reads the transcript at `file` back into the pane's state. */
+async function rebuildFrom($: EngineInterface, file: string) {
   let text: string
   try {
     text = await $.fs.read(file)
@@ -989,6 +1002,7 @@ export const register: Register = (on, options) => {
     // ---- the graph's data: each note read, at its size and latest turn
     await read($, indexStamp)
     await ensureVault($)
+    const rebuilding = await read($, isRebuilding)
     const root = vaultRootPath
     if (Svg && root && vault.length > 0 && !vaultIndex) void buildIndex($, root)
     const lastTurnOf = new Map<string, number>()
@@ -1021,6 +1035,10 @@ export const register: Register = (on, options) => {
             area: areaOfGroup(g.name),
             isUsed: g.isUsed,
             color: noteColor(g.paths.find(p => !isFolder(p)) ?? g.name),
+            files: g.paths.map(p => ({
+              name: isFolder(p) ? `${fileLabel(p)} (looked through)` : fileLabel(p),
+              tokens: tokensOf.get(p) ?? 0,
+            })),
           })),
         drawWidth,
       )
@@ -1166,7 +1184,7 @@ export const register: Register = (on, options) => {
               </Box>
             </Box>
           ))}
-          {isMissing && (
+          {isMissing && !rebuilding && (
             <Box gap={1} alignItems="center">
               {Svg ? (
                 <Svg alt="Missing folder" width={16} height={16} source={FOLDER_MISSING_ICON} />
@@ -1180,7 +1198,9 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
-    const vaultBody = isMissing ? (
+    const vaultBody = rebuilding && vault.length === 0 ? (
+      <Text dimColor>Reading this chat's history…</Text>
+    ) : isMissing ? (
       <Text dimColor>Nothing read yet</Text>
     ) : vault.length === 0 ? (
       <Text dimColor>Added, nothing read yet</Text>
