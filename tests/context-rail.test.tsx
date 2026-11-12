@@ -178,7 +178,7 @@ test('the graph draws loaded notes, their links, and linked notes not loaded', a
   await ui.unmount()
   const again = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const svgs = await again.findAll({ type: 'Svg' } as never)
-  const source = svgs.map((g: any) => String(g?.props?.source ?? '')).find(s => s.includes('width="480"')) ?? ''
+  const source = svgs.map((g: any) => String(g?.props?.source ?? '')).find(s => s.includes('read in turn')) ?? ''
   expect(source).toContain('ui-rules: ')
   expect(source).toContain('caidence: ')
   expect(source).toContain('writing-rules: linked, not loaded')

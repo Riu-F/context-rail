@@ -25,6 +25,8 @@ export type GraphInput = {
   latestTurn: number
   focus: string | null
   index: VaultIndex | null
+  /** The width to draw at, in CSS pixels; the graph keeps text at one size and grows its layout. */
+  width?: number
 }
 
 /** Links in a note's text, by the lower-cased note name they point at. */
@@ -67,11 +69,16 @@ function hash(text: string, seed = 5381): number {
   return (h >>> 0) / 4294967295
 }
 
-const WIDTH = 480
-const HEIGHT = 400
-const CX = WIDTH / 2
-const CY = HEIGHT / 2
-const RIM = 168
+/** The drawing's size and the circle inside it, from the width it gets. */
+type Frame = { width: number; height: number; cx: number; cy: number; rim: number; scale: number }
+
+function frameFor(width = 480): Frame {
+  const w = Math.max(260, Math.min(1400, Math.round(width)))
+  const height = Math.max(240, Math.min(820, Math.round(w * 0.82)))
+  // Room for the area names: a column each side, a line top and bottom.
+  const rim = Math.max(80, Math.min(w / 2 - 74, height / 2 - 22))
+  return { width: w, height, cx: w / 2, cy: height / 2, rim, scale: Math.max(0.8, Math.min(1.8, rim / 168)) }
+}
 
 type Slice = { area: string; start: number; size: number }
 
@@ -96,11 +103,11 @@ function slices(areas: Map<string, number>): Slice[] {
 }
 
 /** A note's place: its area's slice, then a spot fixed by its path. */
-function place(path: string, all: Slice[]): { x: number; y: number } {
+function place(path: string, all: Slice[], f: Frame): { x: number; y: number } {
   const slice = all.find(s => s.area === areaOf(path)) ?? all[0]
   const angle = slice ? slice.start + slice.size * (0.1 + 0.8 * hash(path)) : 0
-  const radius = 34 + 112 * Math.sqrt(hash(path, 7919))
-  return { x: CX + Math.cos(angle) * radius, y: CY + Math.sin(angle) * radius }
+  const radius = f.rim * (0.2 + 0.67 * Math.sqrt(hash(path, 7919)))
+  return { x: f.cx + Math.cos(angle) * radius, y: f.cy + Math.sin(angle) * radius }
 }
 
 function escape(text: string): string {
@@ -111,8 +118,12 @@ function k(tokens: number): string {
   return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens)
 }
 
-/** The graph as an SVG document, `WIDTH` by `HEIGHT` units. */
-export function graphSvg({ used, latestTurn, focus, index }: GraphInput): string {
+/**
+ * The graph as an SVG document, one unit to a CSS pixel at the given width, so
+ * a wider pane gets a bigger graph with text the same size.
+ */
+export function graphSvg({ used, latestTurn, focus, index, width }: GraphInput): string {
+  const f = frameFor(width)
   const usedSet = new Set(used.map(n => n.path))
 
   // Notes linked to what was loaded but not loaded themselves, the most
@@ -135,11 +146,14 @@ export function graphSvg({ used, latestTurn, focus, index }: GraphInput): string
     areaCount.set(areaOf(path), (areaCount.get(areaOf(path)) ?? 0) + 1)
   }
   const sliceList = slices(areaCount)
-  const nodes = [...used, ...ghosts].map(n => ({ ...n, ...place(n.path, sliceList) }))
+  const nodes = [...used, ...ghosts].map(n => ({ ...n, ...place(n.path, sliceList, f) }))
   const at = new Map(nodes.map(n => [n.path, n]))
-  const radius = (n: GraphNode) => (n.turn === 0 ? 2.5 : 4 + Math.sqrt(n.tokens / 1000) * 2.4)
-  const opacity = (n: GraphNode) =>
-    n.turn === 0 ? 0.35 : Math.max(0.35, 1 - (latestTurn - n.turn) * 0.22)
+  const radius = (n: GraphNode) =>
+    n.turn === 0 ? 2.5 : (4 + Math.sqrt(n.tokens / 1000) * 2.4) * f.scale
+  // What the latest turn used is full strength; what earlier turns loaded
+  // stays in the graph, clearly dimmer.
+  const isLatest = (n: GraphNode) => n.turn > 0 && n.turn === latestTurn
+  const opacity = (n: GraphNode) => (n.turn === 0 ? 0.22 : isLatest(n) ? 1 : 0.3)
 
   const edges: string[] = []
   if (index) {
@@ -152,21 +166,28 @@ export function graphSvg({ used, latestTurn, focus, index }: GraphInput): string
         const isFocus = focus !== null && (n.path === focus || other === focus)
         if (!m || seen.has(key) || !(isLoaded || isFocus)) continue
         seen.add(key)
+        const isNow = isLatest(n) || isLatest(m)
         edges.push(
-          `<line x1="${n.x.toFixed(1)}" y1="${n.y.toFixed(1)}" x2="${m.x.toFixed(1)}" y2="${m.y.toFixed(1)}" stroke="#8a8a8a" stroke-width="${isFocus ? 1.4 : 0.7}" stroke-opacity="${isFocus ? 0.9 : 0.35}"${isLoaded ? '' : ' stroke-dasharray="2 3"'}/>`,
+          `<line x1="${n.x.toFixed(1)}" y1="${n.y.toFixed(1)}" x2="${m.x.toFixed(1)}" y2="${m.y.toFixed(1)}" stroke="#8a8a8a" stroke-width="${isFocus ? 1.4 : isNow ? 0.9 : 0.6}" stroke-opacity="${isFocus ? 0.9 : isNow ? 0.5 : 0.16}"${isLoaded ? '' : ' stroke-dasharray="2 3"'}/>`,
         )
       }
     }
   }
 
-  // Area names sit outside the rim, at the middle of their slice.
+  // Area names sit outside the rim, at the middle of their slice; their
+  // boxes are kept so note names stay clear of them.
+  const rimBoxes: { x0: number; x1: number; y0: number; y1: number }[] = []
   const rim = sliceList
     .map(({ area, start, size }) => {
       const angle = start + size / 2
-      const x = CX + Math.cos(angle) * RIM
-      const y = CY + Math.sin(angle) * RIM + 4
+      const x = f.cx + Math.cos(angle) * (f.rim + 6)
+      const y = f.cy + Math.sin(angle) * (f.rim + 6) + 4
       const anchor = Math.abs(Math.cos(angle)) < 0.25 ? 'middle' : Math.cos(angle) > 0 ? 'start' : 'end'
       const isPresent = nodes.some(n => areaOf(n.path) === area)
+      const label = area === 'root' ? 'vault root' : area
+      const w = label.length * 7.2
+      const x0 = anchor === 'start' ? x : anchor === 'end' ? x - w : x - w / 2
+      rimBoxes.push({ x0, x1: x0 + w, y0: y - 12, y1: y + 3 })
       return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="${anchor}" font-size="13" fill="${areaColor(area)}" fill-opacity="${isPresent ? 0.95 : 0.35}">${area === 'root' ? 'vault root' : area}</text>`
     })
     .join('')
@@ -174,13 +195,22 @@ export function graphSvg({ used, latestTurn, focus, index }: GraphInput): string
   const circles = nodes
     .sort((a, b) => (a.turn === 0 ? -1 : 0) - (b.turn === 0 ? -1 : 0) || b.tokens - a.tokens)
     .map(n => {
-      const isLatest = n.turn > 0 && n.turn === latestTurn
+      const isNow = isLatest(n)
       const isFocus = n.path === focus
+      const color = areaColor(areaOf(n.path))
+      const cx = n.x.toFixed(1)
+      const cy = n.y.toFixed(1)
+      const r = radius(n)
       const tip =
         n.turn === 0
           ? `${noteName(n.path)}: linked, not loaded`
-          : `${noteName(n.path)}: ${k(n.tokens)} tokens, read in turn ${n.turn}`
-      return `<g><title>${escape(tip)}</title><circle cx="${n.x.toFixed(1)}" cy="${n.y.toFixed(1)}" r="${radius(n).toFixed(1)}" fill="${areaColor(areaOf(n.path))}" fill-opacity="${opacity(n)}"${isLatest || isFocus ? ` stroke="${isFocus ? '#ffffff' : areaColor(areaOf(n.path))}" stroke-width="${isFocus ? 2 : 1.5}" stroke-opacity="0.9"` : ''}/></g>`
+          : `${noteName(n.path)}: ${k(n.tokens)} tokens, read in turn ${n.turn}${isNow ? ' (latest)' : ''}`
+      // A soft halo marks what the latest turn used.
+      const halo = isNow
+        ? `<circle cx="${cx}" cy="${cy}" r="${(r + 5 * f.scale).toFixed(1)}" fill="${color}" fill-opacity="0.22"/>`
+        : ''
+      const ring = isFocus ? ` stroke="#ffffff" stroke-width="2" stroke-opacity="0.95"` : ''
+      return `<g><title>${escape(tip)}</title>${halo}<circle cx="${cx}" cy="${cy}" r="${r.toFixed(1)}" fill="${color}" fill-opacity="${opacity(n)}"${ring}/></g>`
     })
     .join('')
 
@@ -194,7 +224,7 @@ export function graphSvg({ used, latestTurn, focus, index }: GraphInput): string
   // Placed biggest first, under the node or else over it; a name that would
   // overlap one already placed, or a node, is left to its tooltip.
   type Box = { x0: number; x1: number; y0: number; y1: number }
-  const placed: Box[] = []
+  const placed: Box[] = [...rimBoxes]
   const biggest = new Set(named.slice(0, 3).map(n => n.path))
   const hits = (box: Box) =>
     placed.some(b => b.x0 < box.x1 && box.x0 < b.x1 && b.y0 < box.y1 && box.y0 < b.y1) ||
@@ -215,7 +245,7 @@ export function graphSvg({ used, latestTurn, focus, index }: GraphInput): string
         { x: n.x - r - 4, y: n.y + 4, anchor: 'end', x0: n.x - r - 4 - w },
       ]
         .map(s => ({ ...s, box: { x0: s.x0, x1: s.x0 + w, y0: s.y - 10, y1: s.y + 3 } }))
-        .filter(s => s.box.x0 >= 0 && s.box.x1 <= WIDTH)
+        .filter(s => s.box.x0 >= 0 && s.box.x1 <= f.width)
       // The three biggest notes always get a name, over a node if they must.
       const overLabel = (box: Box) =>
         placed.some(b => b.x0 < box.x1 && box.x0 < b.x1 && b.y0 < box.y1 && box.y0 < b.y1)
@@ -225,10 +255,12 @@ export function graphSvg({ used, latestTurn, focus, index }: GraphInput): string
       if (!spot) return []
       placed.push(spot.box)
       return [
-        `<text x="${spot.x.toFixed(1)}" y="${spot.y.toFixed(1)}" text-anchor="${spot.anchor}" font-size="11" fill="#a3a3a3" fill-opacity="${n.turn === latestTurn || n.path === focus ? 1 : 0.75}">${escape(name)}</text>`,
+        n.turn === latestTurn || n.path === focus
+          ? `<text x="${spot.x.toFixed(1)}" y="${spot.y.toFixed(1)}" text-anchor="${spot.anchor}" font-size="11.5" font-weight="600" fill="#e6e6e6">${escape(name)}</text>`
+          : `<text x="${spot.x.toFixed(1)}" y="${spot.y.toFixed(1)}" text-anchor="${spot.anchor}" font-size="11" fill="#8a8a8a" fill-opacity="0.8">${escape(name)}</text>`,
       ]
     })
     .join('')
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}" font-family="-apple-system, system-ui, sans-serif">${edges.join('')}${circles}${labels}${rim}</svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${f.width}" height="${f.height}" viewBox="0 0 ${f.width} ${f.height}" font-family="-apple-system, system-ui, sans-serif">${edges.join('')}${circles}${labels}${rim}</svg>`
 }

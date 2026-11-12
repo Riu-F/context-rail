@@ -779,6 +779,9 @@ export const register: Register = on => {
               latestTurn: promptCount,
               focus: focused,
               index: vaultIndex,
+              // The pane's width in cells of its code font, about 8 pixels each:
+              // a wider pane draws a bigger graph, the text the same size.
+              width: e.props.bodyColumns * 8.2,
             })}
           />
         )}
@@ -825,14 +828,14 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column" gap={2}>
-        {cost}
-        {limits}
-        {context}
         {folderList}
+        {context}
         <Box flexDirection="column" gap={1}>
           {heading(VAULT_NAME)}
           {vaultBody}
         </Box>
+        {limits}
+        {cost}
       </Box>
     )
   })
