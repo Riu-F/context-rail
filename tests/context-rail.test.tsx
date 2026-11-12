@@ -125,9 +125,9 @@ test('a shell command that moves into the vault counts the files it names', asyn
   const text = async (re: RegExp) => (await ui.find({ type: 'Text', text: re }))?.text
   expect(await text(/files read$/)).toBe('3 files read')
   await ui.press({ key: 'g:work' })
-  expect(await text(/^sanity$/)).toBe('sanity')
+  expect(await ui.find({ key: 'f:work/sanity.md' } as never)).toBeDefined()
   await ui.press({ key: 'g:Vault root' })
-  expect(await text(/^now$/)).toBe('now')
+  expect(await ui.find({ key: 'f:now.md' } as never)).toBeDefined()
   await ui.unmount()
 })
 
@@ -144,4 +144,44 @@ test('a shell command that only looks around the vault is not a file read', asyn
     'Vault root (looked through)',
   )
   await ui.unmount()
+})
+
+test('the graph draws loaded notes, their links, and linked notes not loaded', async ($, on) => {
+  engine(on, { usd: 0 })
+  const vault: Record<string, string> = {
+    'about-me/ui-rules.md': 'See [[writing-rules]] and [[caidence]].',
+    'about-me/writing-rules.md': 'Pairs with [[ui-rules]].',
+    'work/projects/caidence.md': 'Uses [[ui-rules]].',
+  }
+  on('fs.list', (_: unknown, e: any) => {
+    const dir = String(e.path ?? e).replace(`${VAULT}`, '').replace(/^\//, '')
+    const names = new Map<string, 'file' | 'dir'>()
+    for (const p of Object.keys(vault)) {
+      if (dir && !p.startsWith(`${dir}/`)) continue
+      const rest = dir ? p.slice(dir.length + 1) : p
+      const [head, ...tail] = rest.split('/')
+      names.set(head!, tail.length ? 'dir' : 'file')
+    }
+    return {
+      value: [...names].map(([name, kind]) => ({ name, kind, size: 0, mtimeMs: 0, isLink: false })),
+    }
+  })
+  on('fs.read', (_: unknown, e: any) => ({
+    value: vault[String(e.path ?? e).replace(`${VAULT}/`, '')] ?? '',
+  }))
+
+  await $.tool.call({ tool: 'Read', file_path: `${VAULT}/about-me/ui-rules.md` })
+  await $.tool.call({ tool: 'Read', file_path: `${VAULT}/work/projects/caidence.md` })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // The index builds in the background; the second draw has the links.
+  await ui.unmount()
+  const again = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const svgs = await again.findAll({ type: 'Svg' } as never)
+  const source = svgs.map((g: any) => String(g?.props?.source ?? '')).find(s => s.includes('width="480"')) ?? ''
+  expect(source).toContain('ui-rules: ')
+  expect(source).toContain('caidence: ')
+  expect(source).toContain('writing-rules: linked, not loaded')
+  expect(source).toContain('<line')
+  await again.unmount()
 })

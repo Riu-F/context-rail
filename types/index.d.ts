@@ -49,6 +49,8 @@ declare module 'claude-code' {
       folders: string[]
       open: Shaped<string[]>
       isPaneClosed: boolean
+      focus: string | null
+      indexStamp: number
     }
   }
 }

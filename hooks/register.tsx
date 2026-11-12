@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { ContextFill, Limit, ReadKind, Totals, Turn } from '../types'
+import { graphSvg, linksIn } from './graph'
+import type { GraphNode, VaultIndex } from './graph'
 
 const PANE = 'context-rail'
 const TITLE = 'Session'
@@ -28,6 +30,15 @@ const folders = atom({ plugin: 'context-rail', key: 'folders' } as const, [])
 const open = atom({ plugin: 'context-rail', key: 'open' } as const, [], {
   shape: 'open-2',
 })
+// The note picked in the vault list, ringed in the graph.
+const focus = atom({ plugin: 'context-rail', key: 'focus' } as const, null)
+// Bumped when the vault index is built, so the pane redraws with the links.
+const indexStamp = atom({ plugin: 'context-rail', key: 'indexStamp' } as const, 0)
+
+// The vault's notes and links, read once per load of the mod.
+let vaultIndex: VaultIndex | null = null
+let isIndexing = false
+
 const isPaneClosed = atom(
   { plugin: 'context-rail', key: 'isPaneClosed' } as const,
   false,
@@ -241,6 +252,59 @@ async function refreshTotals($: EngineInterface): Promise<Totals> {
     }
   }
   return next
+}
+
+/** The vault's absolute path, from the home folder the working directory sits in. */
+function vaultRoot(cwd: string): string | null {
+  const home = /^\/Users\/[^/]+/.exec(cwd)?.[0]
+  return home ? `${home}/Desktop/claude-context` : null
+}
+
+async function buildIndex($: EngineInterface, root: string) {
+  if (vaultIndex || isIndexing) return
+  isIndexing = true
+  try {
+    const notes: { path: string; text: string }[] = []
+    const walk = async (rel: string) => {
+      const entries = await $.fs.list(rel ? `${root}/${rel}` : root)
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue
+        const path = rel ? `${rel}/${entry.name}` : entry.name
+        if (entry.kind === 'dir') await walk(path)
+        else if (entry.kind === 'file' && entry.name.endsWith('.md')) {
+          notes.push({ path, text: await $.fs.read(`${root}/${path}`) })
+        }
+      }
+    }
+    await walk('')
+    const byName = new Map<string, string>()
+    const tokenCount = new Map<string, number>()
+    for (const n of notes) {
+      const name = (n.path.split('/').pop() ?? n.path).replace(/\.md$/, '').toLowerCase()
+      // Two notes of one name (each folder's CLAUDE.md): the shallower wins.
+      const held = byName.get(name)
+      if (!held || held.split('/').length > n.path.split('/').length) byName.set(name, n.path)
+      tokenCount.set(n.path, Math.round(n.text.length / 4))
+    }
+    const links = new Map<string, Set<string>>()
+    const join = (a: string, b: string) => {
+      if (a === b) return
+      links.set(a, (links.get(a) ?? new Set()).add(b))
+      links.set(b, (links.get(b) ?? new Set()).add(a))
+    }
+    for (const n of notes) {
+      for (const name of linksIn(n.text)) {
+        const target = byName.get(name)
+        if (target) join(n.path, target)
+      }
+    }
+    vaultIndex = { byName, tokens: tokenCount, links }
+    await update($, indexStamp, n => n + 1)
+  } catch {
+    // No vault to read here: the graph draws without links.
+  } finally {
+    isIndexing = false
+  }
 }
 
 async function openFolder($: EngineInterface, dir: string) {
@@ -680,6 +744,21 @@ export const register: Register = on => {
       .sort((a, b) => b.tokens - a.tokens || b.paths.length - a.paths.length)
     const isMissing = vault.length === 0 && !hasVaultFolder
 
+    // ---- the graph's data: each note read, at its size and latest turn
+    await read($, indexStamp)
+    const root = vaultRoot(cwd)
+    if (Svg && root && vault.length > 0 && !vaultIndex) void buildIndex($, root)
+    const lastTurnOf = new Map<string, number>()
+    for (const r of vault) {
+      if (!isFolder(r.path)) lastTurnOf.set(r.path, Math.max(lastTurnOf.get(r.path) ?? 0, r.turn))
+    }
+    const graphNodes: GraphNode[] = [...lastTurnOf.entries()].map(([path, turn]) => ({
+      path,
+      turn,
+      tokens: tokensOf.get(path) || vaultIndex?.tokens.get(path) || 0,
+    }))
+    const focused = await read($, focus)
+
     const vaultBody = isMissing ? (
       <Text color="warning">Not loaded in this session</Text>
     ) : vault.length === 0 ? (
@@ -689,6 +768,19 @@ export const register: Register = on => {
         {row(
           `${files.length} ${files.length === 1 ? 'file' : 'files'} read`,
           vaultTokens > 0 ? `about ${tokens(vaultTokens)} tokens` : '',
+        )}
+        {Svg && (
+          <Svg
+            key="graph"
+            isInteractive
+            alt={`Graph of the ${files.length} vault notes read this session, sized by tokens, with the notes they link to`}
+            source={graphSvg({
+              used: graphNodes,
+              latestTurn: promptCount,
+              focus: focused,
+              index: vaultIndex,
+            })}
+          />
         )}
         <Box flexDirection="column" gap={1}>
           {groupRows.map(g => {
@@ -706,11 +798,22 @@ export const register: Register = on => {
                   ])}
                 {isOpen(`g:${g.name}`) &&
                   g.paths.map(p =>
-                    detail(
-                      `p-${p}`,
-                      isFolder(p) ? `${fileLabel(p)} (looked through)` : fileLabel(p),
-                      (tokensOf.get(p) ?? 0) > 0 ? tokens(tokensOf.get(p) ?? 0) : '',
-                      !usedNow.has(p),
+                    isFolder(p) ? (
+                      detail(`p-${p}`, `${fileLabel(p)} (looked through)`, '', !usedNow.has(p))
+                    ) : (
+                      <Box key={`p-${p}`} justifyContent="space-between" gap={1} paddingLeft={2}>
+                        <Button
+                          key={`f:${p}`}
+                          plain
+                          dimColor={!usedNow.has(p) && focused !== p}
+                          onPress={() => update($, focus, current => (current === p ? null : p))}
+                        >
+                          {focused === p ? `● ${fileLabel(p)}` : fileLabel(p)}
+                        </Button>
+                        <Text dimColor={!usedNow.has(p)} tabular>
+                          {(tokensOf.get(p) ?? 0) > 0 ? tokens(tokensOf.get(p) ?? 0) : ''}
+                        </Text>
+                      </Box>
                     ),
                   )}
               </Box>

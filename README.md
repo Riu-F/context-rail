@@ -8,6 +8,8 @@ A pane beside the chat in Claude Code and the Claude desktop app that shows what
 - **Folders:** the session's folders. Hover for the path, click to open it in Finder.
 - **Context vault:** which files from `~/Desktop/claude-context` the session has read, grouped by folder, with each folder's share of the tokens read. Files and folders the latest turn used are drawn bright, the rest dim. The vault shows in yellow until it is loaded.
 
+Above the vault list is a graph of the notes the session read. Each sits in its area's slice of the circle at a spot fixed by its path, so the graph keeps its shape. Size is tokens loaded, colour is area, and the latest turn is bright. Lines are the `[[links]]` between loaded notes, and small faint dots are notes linked to them that were not loaded. Hover a note for its name and size; click a file in the list below to ring it in the graph and show its links.
+
 Under each reply it adds a line with that turn's cost and the vault files it used. `/context-rail` opens the pane if it was closed; a bar above the prompt offers the same when you close it.
 
 ## Install
