@@ -30,6 +30,10 @@ Until a vault is known, Folders shows "No Obsidian vault in this session" in ora
 - **Layout:** each top folder gets a slice of the Map's circle, sized by how many notes it holds. The vault list and the Share chart group notes by their top folder, or their top two folders when they are two or more folders deep.
 - **Tokens:** about four characters a token, from the size of what was read.
 
+## After a chat restarts
+
+The pane's state lives as long as the session's process. When the app stops an idle chat and starts it again, `rebuildSession` restores it: vault reads and added folders from the chat's transcript (`<config>/projects/<project>/<session id>.jsonl`), and each turn's cost from the mod's store (`turns:<session id>`, the last 40 sessions kept). It runs only when the pane's memory is empty, and decodes only the transcript lines that can hold a prompt, a tool call or result, or a folder.
+
 ## Checking a new vault
 
 Look at the vault before changing any code:

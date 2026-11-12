@@ -18,11 +18,15 @@ const PANE = {
 
 const VAULT = '/Users/someone/Desktop/claude-context'
 
-function engine(on: any, cost: { usd: number }) {
+function engine(on: any, cost: { usd: number }, alsoExists: (path: string) => boolean = () => false) {
   on('clock.now', () => ({ value: 1_000 }))
-  on('env.get', () => ({ value: '/Users/someone' }))
+  on('env.get', (_: unknown, e: any) => ({ value: String(e.name ?? e) === 'HOME' ? '/Users/someone' : undefined }))
+  on('session.id', () => ({ value: 'abc123' }))
   // The fake vault is the one folder holding `.obsidian`.
-  on('fs.exists', (_: unknown, e: any) => ({ value: String(e.path ?? e) === `${VAULT}/.obsidian` }))
+  on('fs.exists', (_: unknown, e: any) => {
+    const path = String(e.path ?? e)
+    return { value: path === `${VAULT}/.obsidian` || alsoExists(path) }
+  })
   on('session.cwd', () => ({ value: '/Users/someone/project' }))
   on('session.turns', () => ({ value: 1 }))
   on('session.usage', () => ({
@@ -252,5 +256,36 @@ test('the vaultPath setting names a vault with no .obsidian lookup', { options: 
   expect((await ui.find({ type: 'Text', text: /files? read$/ }))?.text).toBe('1 file read')
   await ui.press({ key: 'g:journal' })
   expect(await ui.find({ key: 'f:journal/today.md' } as never)).toBeDefined()
+  await ui.unmount()
+})
+
+test('after the app restarts a chat, the reads come back from its transcript', async ($, on) => {
+  const file = '/Users/someone/.claude/projects/-Users-someone/abc123.jsonl'
+  engine(on, { usd: 0 }, path => path === file)
+  const transcript = [
+    { type: 'user', message: { content: 'load some context' }, promptId: 'p1' },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: `${VAULT}/about-me/ui-rules.md` } }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'x'.repeat(8000) }] } },
+    { type: 'user', message: { content: 'and more' }, promptId: 'p2' },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 't2', name: 'Read', input: { file_path: `${VAULT}/work/projects/caidence.md` } }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't2', content: 'y'.repeat(4000) }] } },
+  ]
+    .map(x => JSON.stringify(x))
+    .join('\n')
+  on('fs.list', (_: unknown, e: any) => ({
+    value:
+      String(e.path ?? e) === '/Users/someone/.claude/projects'
+        ? [{ name: '-Users-someone', kind: 'dir', size: 0, mtimeMs: 0, isLink: false }]
+        : [],
+  }))
+  on('fs.read', (_: unknown, e: any) => ({ value: String(e.path ?? e) === file ? transcript : '' }))
+  on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'context-rail' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+
+  await $.session.start({ cwd: '/Users/someone', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /files? read$/ }))?.text).toBe('2 files read')
+  expect((await ui.find({ type: 'Text', text: /^3\.0k$/ }))?.text).toBe('3.0k')
   await ui.unmount()
 })

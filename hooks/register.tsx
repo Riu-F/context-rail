@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ContextFill, Limit, ReadKind, Totals, Turn } from '../types'
+import type { ContextFill, Limit, ReadKind, Totals, Turn, VaultRead } from '../types'
 import { gaps, graphSvg, lighten, linksIn, noteColor, noteName, parseColorGroups, setColorRules, shareSvg, timelineSvg, treemapSvg } from './graph'
 import type { GraphNode, VaultIndex } from './graph'
 
@@ -442,6 +442,183 @@ async function openPane($: EngineInterface) {
   await $.ui.open({ id: PANE, title: TITLE })
 }
 
+// ---------------------------------------------------------------- after a restart
+//
+// The pane's state lives as long as the session's process. When the app stops
+// an idle chat and starts it again later, that state is gone, so it is rebuilt:
+// the vault reads and folders from the chat's transcript on disk, and each
+// turn's cost (which the transcript does not hold in a usable form) from the
+// mod's own store, kept per session.
+
+const STORE_SESSIONS = 'sessions'
+const KEEP_SESSIONS = 40
+
+/** The chat's transcript file: `<config>/projects/<project>/<session id>.jsonl`. */
+async function transcriptPath($: EngineInterface): Promise<string | null> {
+  const id = await $.session.id()
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${homeDir}/.claude`
+  try {
+    for (const dir of await $.fs.list(`${config}/projects`)) {
+      if (dir.kind !== 'dir') continue
+      const file = `${config}/projects/${dir.name}/${id}.jsonl`
+      if (await $.fs.exists(file)) return file
+    }
+  } catch {
+    // No projects folder to look in.
+  }
+  return null
+}
+
+type TranscriptEntry = {
+  type?: string
+  isMeta?: boolean
+  uuid?: string
+  promptId?: string
+  attachment?: { type?: string; path?: string; snapshot?: { workingDirectory?: string; additionalWorkingDirectories?: string[] } }
+  message?: { content?: unknown }
+}
+type ContentBlock = { type?: string; id?: string; name?: string; input?: Record<string, unknown>; tool_use_id?: string; content?: unknown; text?: string }
+
+/** Rebuilds the vault reads, folders and turn costs after the session's process restarted. */
+async function rebuildSession($: EngineInterface) {
+  await ensureVault($)
+  const id = await $.session.id()
+
+  // Turn costs: from the store, when this session has none in memory.
+  if ((await read($, turns)).length === 0) {
+    try {
+      const saved = await $.store.get(`turns:${id}`)
+      if (Array.isArray(saved) && saved.length > 0) await update($, turns, () => saved as Turn[])
+    } catch {
+      // No store to read: the turn costs start again from here.
+    }
+  }
+
+  // Only after a restart: while the process lives, memory already holds it all.
+  if ((await read($, reads)).length > 0) return
+  const file = await transcriptPath($)
+  if (!file) return
+  let text: string
+  try {
+    text = await $.fs.read(file)
+  } catch {
+    return
+  }
+
+  const prompts = new Set<string>()
+  const calls = new Map<string, { name: string; input: Record<string, unknown>; turn: number; cwd: string }>()
+  const sizes = new Map<string, number>()
+  const mentions: { path: string; turn: number }[] = []
+  const dirs = new Set<string>()
+  let cwd = ''
+
+  // Most of a long transcript is request records and images; only lines that
+  // can hold a prompt, a tool call or result, or a folder are decoded.
+  for (const line of text.split('\n')) {
+    if (!line) continue
+    const isAssistant = line.includes('"type":"assistant"')
+    if (isAssistant ? !line.includes('"tool_use"') : !line.includes('"type":"user"') && !line.includes('"type":"attachment"')) continue
+    let entry: TranscriptEntry
+    try {
+      entry = JSON.parse(line) as TranscriptEntry
+    } catch {
+      continue
+    }
+    const content = entry.message?.content
+    const blocks = Array.isArray(content) ? (content as ContentBlock[]) : []
+    if (entry.type === 'attachment') {
+      const a = entry.attachment
+      if (a?.type === 'environment') {
+        cwd = a.snapshot?.workingDirectory ?? cwd
+        for (const d of a.snapshot?.additionalWorkingDirectories ?? []) dirs.add(d)
+      } else if ((a?.type === 'directory' || a?.type === 'nested_memory' || a?.type === 'file') && a.path) {
+        mentions.push({ path: a.path, turn: Math.max(1, prompts.size) })
+      }
+      continue
+    }
+    if (entry.type === 'user' && !entry.isMeta) {
+      const isPrompt = typeof content === 'string' || blocks.some(b => b.type === 'text')
+      if (isPrompt) {
+        prompts.add(entry.promptId ?? entry.uuid ?? String(prompts.size))
+        const words = typeof content === 'string' ? content : blocks.map(b => b.text ?? '').join(' ')
+        for (const m of words.matchAll(/@"?([^\s"]+)"?/g)) mentions.push({ path: m[1] ?? '', turn: prompts.size })
+      }
+      for (const b of blocks) {
+        if (b.type !== 'tool_result' || !b.tool_use_id) continue
+        const c = b.content
+        const size =
+          typeof c === 'string'
+            ? c.length
+            : Array.isArray(c)
+              ? (c as ContentBlock[]).reduce((n, x) => n + (x.text?.length ?? 0), 0)
+              : 0
+        sizes.set(b.tool_use_id, Math.max(sizes.get(b.tool_use_id) ?? 0, size))
+      }
+    }
+    if (entry.type === 'assistant') {
+      for (const b of blocks) {
+        if (b.type === 'tool_use' && b.id && b.name && !calls.has(b.id)) {
+          calls.set(b.id, { name: b.name, input: b.input ?? {}, turn: Math.max(1, prompts.size), cwd })
+        }
+      }
+    }
+  }
+
+  // Find the vault from what the chat touched, if it is not known yet.
+  if (!vaultRootPath) {
+    const touched = [
+      ...mentions.map(m => m.path),
+      ...[...calls.values()].map(c =>
+        ['file_path', 'notebook_path', 'path', 'command'].map(k => String(c.input[k] ?? '')).join(' '),
+      ),
+    ]
+    for (const t of touched) {
+      await findVaultIn($, t)
+      if (vaultRootPath) break
+    }
+  }
+  if (!vaultRootPath) return
+
+  const rebuilt: VaultRead[] = []
+  const add = (paths: string[], kind: ReadKind, turn: number, size: number) => {
+    const each = paths.length ? Math.round(size / 4 / paths.length) : 0
+    for (const path of paths) rebuilt.push({ path, kind, turn, tokens: each })
+  }
+  for (const m of mentions) add(vaultPaths(m.path), 'mention', m.turn, 0)
+  for (const [callId, c] of calls) {
+    const field = (k: string) => (typeof c.input[k] === 'string' ? (c.input[k] as string) : '')
+    const size = sizes.get(callId) ?? 0
+    if (c.name === 'Read') add(vaultPaths(field('file_path')), 'read', c.turn, size)
+    else if (c.name === 'Edit' || c.name === 'Write' || c.name === 'NotebookEdit') {
+      add(vaultPaths(field('file_path') || field('notebook_path')), 'edit', c.turn, 0)
+    } else if (c.name === 'Grep' || c.name === 'Glob') {
+      add(vaultPaths(field('path')).map(p => (p.endsWith('/') ? p : `${p}/`)), 'search', c.turn, size)
+    } else if (c.name === 'Bash') {
+      const inVault = vaultPaths(c.cwd)[0]
+      const cwdInVault = inVault === undefined ? null : inVault === './' ? '' : inVault.replace(/\/$/, '')
+      add(shellVaultPaths(field('command'), cwdInVault), 'shell', c.turn, size)
+    }
+  }
+
+  // The transcript holds every read so far, so it replaces what memory has.
+  if (rebuilt.length > 0) await update($, reads, () => rebuilt.slice(-2000))
+  if (dirs.size > 0) {
+    await update($, folders, list => [...new Set([...list, ...dirs])])
+  }
+}
+
+/** Keeps this session's turn costs where a restart can find them. */
+async function saveTurns($: EngineInterface, list: Turn[]) {
+  const id = await $.session.id()
+  await $.store.set(`turns:${id}`, list.slice(-200))
+  const known = await $.store.get(STORE_SESSIONS)
+  const ids = [...(Array.isArray(known) ? (known as string[]) : []).filter(x => x !== id), id]
+  for (const old of ids.slice(0, Math.max(0, ids.length - KEEP_SESSIONS))) {
+    await $.store.delete(`turns:${old}`)
+  }
+  await $.store.set(STORE_SESSIONS, ids.slice(-KEEP_SESSIONS))
+}
+
 // ---------------------------------------------------------------- hooks
 
 export const register: Register = (on, options) => {
@@ -464,6 +641,9 @@ export const register: Register = (on, options) => {
     })
     const started = await next(e)
     void refreshTotals($)
+    // After the app restarts an idle chat, the pane's memory is empty: rebuild
+    // it before the pane opens, so it never shows a half-empty picture.
+    await rebuildSession($).catch(() => undefined)
     if (!(await read($, isPaneClosed))) void openPane($)
     return started
   })
@@ -570,6 +750,7 @@ export const register: Register = (on, options) => {
       }
       return [...list, turn].slice(-500)
     })
+    void saveTurns($, await read($, turns)).catch(() => undefined)
     mainTurnId = undefined
     return done
   })
