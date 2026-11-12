@@ -1,0 +1,12 @@
+{
+  "name": "context-rail",
+  "owner": {
+    "name": "Riu-F"
+  },
+  "plugins": [
+    {
+      "name": "context-rail",
+      "source": "./"
+    }
+  ]
+}

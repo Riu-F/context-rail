@@ -1,0 +1,6 @@
+{
+  "name": "context-rail",
+  "version": "0.2.0",
+  "description": "A side pane for what a session holds: cost, plan limits, context, folders, and which context-vault files each turn read",
+  "types": "./types/index.d.ts"
+}

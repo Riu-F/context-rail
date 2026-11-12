@@ -1,0 +1,736 @@
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
+
+import type { ContextFill, Limit, ReadKind, Totals, Turn } from '../types'
+
+const PANE = 'context-rail'
+const TITLE = 'Session'
+
+// The vault every session should have. Matched anywhere in a path, so it
+// holds on any machine where the vault sits on the Desktop.
+const VAULT_NAME = 'Context vault'
+const VAULT_PATH = /(?:~|\/Users\/[^/\s"'`]+)\/Desktop\/claude-context(\/[^\s"'`;|&)<>]*)?/g
+
+// Change a shape tag when that value's fields change: it declines what an
+// earlier version stored, which outlives a reload.
+const turns = atom({ plugin: 'context-rail', key: 'turns' } as const, [], {
+  shape: 'turns-1',
+})
+const totals = atom(
+  { plugin: 'context-rail', key: 'totals' } as const,
+  { limits: [], checkedAt: 0 },
+  { shape: 'totals-2' },
+)
+const reads = atom({ plugin: 'context-rail', key: 'reads' } as const, [], {
+  shape: 'reads-1',
+})
+const folders = atom({ plugin: 'context-rail', key: 'folders' } as const, [])
+const open = atom({ plugin: 'context-rail', key: 'open' } as const, [], {
+  shape: 'open-2',
+})
+const isPaneClosed = atom(
+  { plugin: 'context-rail', key: 'isPaneClosed' } as const,
+  false,
+)
+
+// Colours for the drawings: the context categories as the rail draws them.
+const BLUE = '#4b8bf5'
+const BLUE_DIM = '#4b8bf566'
+const AMBER = '#e5a50a'
+const PART_COLORS: Record<string, string> = {
+  Messages: BLUE,
+  'MCP tools': '#e0702e',
+  'System tools': '#3aa883',
+  'System prompt': AMBER,
+  'Custom agents': '#b07cf0',
+}
+function partColor(name: string): string {
+  return PART_COLORS[name] ?? '#9a9a9a'
+}
+const FOLDER_ICON =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9a9a9a" stroke-width="1.8" stroke-linejoin="round"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2.2h8.4A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/></svg>'
+
+// ---------------------------------------------------------------- formatting
+
+// A turn's reply is matched to its cost by a hash of its text: the
+// transcript's reply block carries no turn id.
+function hash(text: string): string {
+  let h = 5381
+  for (let i = 0; i < text.length; i++) {
+    h = ((h << 5) + h + text.charCodeAt(i)) | 0
+  }
+  return `${text.length}:${h >>> 0}`
+}
+
+function usd(value: number | undefined): string {
+  if (value === undefined) return 'n/a'
+  if (value < 0.01) return value === 0 ? '$0.00' : '<$0.01'
+  return `$${value.toFixed(2)}`
+}
+
+function tokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
+}
+
+function seconds(ms: number): string {
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  return `${Math.floor(s / 60)}m ${s % 60}s`
+}
+
+function cachedShare(t: Turn): number | undefined {
+  const all = t.input + t.cacheRead + t.cacheWrite
+  return all === 0 ? undefined : Math.round((t.cacheRead / all) * 100)
+}
+
+function limitName(kind: string): string {
+  if (kind === 'five_hour') return '5-hour limit'
+  if (kind === 'seven_day') return 'Weekly limit'
+  if (kind === 'spend_limit') return 'Spend limit'
+  return kind.replace(/_/g, ' ')
+}
+
+function resetsIn(resetsAt: string | undefined, now: number): string {
+  if (!resetsAt) return ''
+  const ms = Date.parse(resetsAt) - now
+  if (!Number.isFinite(ms) || ms <= 0) return ''
+  const mins = Math.round(ms / 60000)
+  if (mins < 60) return `Resets in ${mins}m`
+  const hours = Math.floor(mins / 60)
+  if (hours < 48) return `Resets in ${hours}h ${mins % 60}m`
+  return `Resets in ${Math.round(hours / 24)} days`
+}
+
+function shortPath(path: string): string {
+  return path.replace(/^\/Users\/[^/]+/, '~')
+}
+
+/** A vault-relative path's file name without `.md`, for a compact list. */
+function fileLabel(path: string): string {
+  const name = path.replace(/\/$/, '').split('/').pop() ?? path
+  if (name === '' || name === '.') return 'Vault root'
+  return name.replace(/\.md$/, '')
+}
+
+function isFolder(path: string): boolean {
+  return path.endsWith('/')
+}
+
+/** `base` and a relative path joined, `.` and `..` resolved; null outside the vault. */
+function joinVault(base: string, rel: string): string | null {
+  const out = base.split('/').filter(Boolean)
+  for (const part of rel.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') {
+      if (out.length === 0) return null
+      out.pop()
+    } else {
+      out.push(part)
+    }
+  }
+  const joined = out.join('/')
+  return rel.endsWith('/') ? `${joined}/` : joined
+}
+
+/**
+ * The vault files a shell command names: full paths anywhere, and short
+ * paths after a `cd` into the vault (or when the session runs inside it).
+ * A short path counts when it names a file by its extension.
+ */
+function shellVaultPaths(command: string, cwdInVault: string | null): string[] {
+  const found = new Set<string>()
+  let base = cwdInVault
+  let didEnterVault = false
+  for (const segment of command.split(/&&|\|\||;|\n|\|/)) {
+    const words = (segment.match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? []).map(w =>
+      w.replace(/^["']|["']$/g, ''),
+    )
+    if (words[0] === 'cd') {
+      const target = words[1] ?? ''
+      const named = vaultPaths(target)[0]
+      if (named !== undefined) {
+        base = named === './' ? '' : named.replace(/\/$/, '')
+        didEnterVault = true
+      } else if (base !== null && !/^[/~$]/.test(target)) {
+        base = joinVault(base, target)
+      } else {
+        base = null
+      }
+      continue
+    }
+    for (const p of vaultPaths(segment)) found.add(p)
+    if (base === null) continue
+    for (const word of words.slice(1)) {
+      if (/^[-/~]|[$*?=(){}<>`]/.test(word)) continue
+      if (!/\.[A-Za-z0-9]{1,6}$/.test(word)) continue
+      if (/(^|\/)\.(git|obsidian)\//.test(word)) continue
+      const path = joinVault(base, word)
+      if (path) found.add(path)
+    }
+  }
+  const files = [...found].filter(p => !isFolder(p))
+  if (files.length > 0) return files
+  // Nothing named: the command looked around the vault.
+  if (found.size > 0) return [...found]
+  return didEnterVault && base !== null ? [base === '' ? './' : `${base}/`] : []
+}
+
+/** The vault folder a path is grouped under in the chart. */
+function groupOf(path: string): string {
+  const parts = path.split('/').filter(p => p !== '' && p !== '.')
+  const depth = isFolder(path) ? parts.length : parts.length - 1
+  if (depth <= 0) return 'Vault root'
+  const [top, second, third] = parts
+  // work/projects/<name>/… and personal/projects/<name>/… group by project.
+  if ((top === 'work' || top === 'personal') && second === 'projects' && depth >= 3 && third) {
+    return `${top}/projects/${third}`
+  }
+  if ((top === 'work' || top === 'personal') && depth >= 2 && second) {
+    return `${top}/${second}`
+  }
+  return top ?? 'Vault root'
+}
+
+/** Every vault path named in a text, relative to the vault root. */
+function vaultPaths(text: string): string[] {
+  const found = new Set<string>()
+  for (const match of text.matchAll(VAULT_PATH)) {
+    const rest = (match[1] ?? '/').replace(/^\//, '')
+    found.add(rest === '' ? './' : rest)
+  }
+  return [...found]
+}
+
+// ---------------------------------------------------------------- engine reads
+
+async function refreshTotals($: EngineInterface): Promise<Totals> {
+  const usage = await $.session.usage({ breakdown: 'summary' })
+  const limits: Limit[] = usage.rateLimits.map(l => ({
+    kind: l.kind,
+    percentUsed: l.percentUsed,
+    resetsAt: l.resetsAt,
+  }))
+  const parts = (usage.context.breakdown?.categories ?? [])
+    .filter(c => c.kind === 'used' && c.tokens > 0)
+    .map(c => ({ name: c.name, tokens: c.tokens, kind: c.kind }))
+    .sort((a, b) => b.tokens - a.tokens)
+  const context: ContextFill = {
+    tokens: usage.context.tokens,
+    window: usage.context.window,
+    percent: usage.context.percent,
+    parts,
+  }
+  const next: Totals = {
+    usd: usage.cost?.usd,
+    limits,
+    context,
+    checkedAt: await $.clock.now(),
+  }
+  await update($, totals, () => next)
+
+  // Vault instruction files that loaded on their own (a folder's CLAUDE.md).
+  const loaded = (usage.context.breakdown?.memoryFiles ?? []).flatMap(f => vaultPaths(f.path))
+  if (loaded.length > 0) {
+    const seen = new Set((await read($, reads)).map(r => r.path))
+    const fresh = loaded.filter(p => !seen.has(p))
+    for (const path of fresh) {
+      const file = usage.context.breakdown?.memoryFiles.find(f => vaultPaths(f.path)[0] === path)
+      await noteVault($, [path], 'auto', (file?.tokens ?? 0) * 4)
+    }
+  }
+  return next
+}
+
+async function openFolder($: EngineInterface, dir: string) {
+  await $.process.run(['open', dir])
+}
+
+async function noteVault(
+  $: EngineInterface,
+  paths: string[],
+  kind: ReadKind,
+  size: number,
+) {
+  if (paths.length === 0) return
+  // Numbered as the chat numbers its prompts, the one running included.
+  const turn = Math.max(1, await $.session.turns())
+  // A result's size is only known for the call as a whole: it is shared
+  // between the paths, at about four characters a token.
+  const each = Math.round(size / 4 / paths.length)
+  await update($, reads, list =>
+    [...list, ...paths.map(path => ({ path, kind, turn, tokens: each }))].slice(-2000),
+  )
+}
+
+async function openPane($: EngineInterface) {
+  await update($, isPaneClosed, () => false)
+  await $.ui.open({ id: PANE, title: TITLE })
+}
+
+// ---------------------------------------------------------------- hooks
+
+export const register: Register = on => {
+  // Per-turn working values, kept in the module: a reload mid-turn only
+  // loses that turn's cost split.
+  let costAtStart: number | undefined
+  let mainTurnId: string | undefined
+  let subagentRuns = 0
+
+  on('session.start', async ($, e, next) => {
+    await $.command.register({
+      name: 'context-rail',
+      description: 'Open the Session pane: costs, limits, context, folders and vault reads',
+    })
+    const started = await next(e)
+    void refreshTotals($)
+    if (!(await read($, isPaneClosed))) void openPane($)
+    return started
+  })
+
+  on('command.run', { command: 'context-rail' }, async $ => {
+    await openPane($)
+    return { text: 'Session pane opened.' }
+  })
+
+  on('ui.close', async ($, e, next) => {
+    const closed = await next(e)
+    if (e.id === PANE && e.origin.kind === 'person') {
+      await update($, isPaneClosed, () => true)
+    }
+    return closed
+  })
+
+  on('classic.DirectoryAdded', async ($, e, next) => {
+    const dir = e.directory
+    await update($, folders, list => (list.includes(dir) ? list : [...list, dir]))
+    await noteVault($, vaultPaths(dir), 'mention', 0)
+    return next(e)
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    // An @-mention of a vault file or folder.
+    const mentioned = [...e.text.matchAll(/@"?([^\s"]+)"?/g)].flatMap(m =>
+      vaultPaths(m[1] ?? ''),
+    )
+    await noteVault($, mentioned, 'mention', 0)
+    return next(e)
+  })
+
+  on('tool.call', async ($, e, next) => {
+    const ran = await next(e)
+    if (ran.deny !== undefined || ran.isError) return ran
+
+    const input = e as unknown as Record<string, unknown>
+    const field = (key: string) => {
+      const value = input[key]
+      return typeof value === 'string' ? value : ''
+    }
+    const size = ran.text?.length ?? 0
+
+    if (e.tool === 'Read') {
+      await noteVault($, vaultPaths(field('file_path')), 'read', size)
+    } else if (e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit') {
+      await noteVault($, vaultPaths(field('file_path') || field('notebook_path')), 'edit', 0)
+    } else if (['Grep', 'Glob'].includes(e.tool)) {
+      const where = vaultPaths(field('path')).map(p => (p.endsWith('/') ? p : `${p}/`))
+      await noteVault($, where, 'search', size)
+    } else if (e.tool === 'Bash') {
+      const cwd = await $.session.cwd()
+      const inVault = vaultPaths(cwd)[0]
+      const cwdInVault =
+        inVault === undefined ? null : inVault === './' ? '' : inVault.replace(/\/$/, '')
+      await noteVault($, shellVaultPaths(field('command'), cwdInVault), 'shell', size)
+    }
+    return ran
+  })
+
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      mainTurnId = e.turnId
+      subagentRuns = 0
+      costAtStart = (await $.session.usage()).cost?.usd
+    }
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const done = await next(e)
+
+    if (e.agentId !== undefined) {
+      subagentRuns += 1
+      return done
+    }
+    if (e.turnId !== mainTurnId) return done
+
+    const now = await refreshTotals($)
+    const u = e.usage
+    const cost =
+      now.usd !== undefined && costAtStart !== undefined
+        ? Math.max(0, now.usd - costAtStart)
+        : undefined
+    const answer = e.answer.trim()
+    const number = await $.session.turns()
+
+    await update($, turns, list => {
+      const turn: Turn = {
+        n: Math.max(number, (list.at(-1)?.n ?? 0) + 1),
+        usd: cost,
+        durationMs: e.durationMs,
+        model: u?.model,
+        input: u?.input_tokens ?? 0,
+        output: u?.output_tokens ?? 0,
+        cacheRead: u?.cache_read_input_tokens ?? 0,
+        cacheWrite: u?.cache_creation_input_tokens ?? 0,
+        subagentRuns,
+        answerHash: answer ? hash(answer) : undefined,
+      }
+      return [...list, turn].slice(-500)
+    })
+    mainTurnId = undefined
+    return done
+  })
+
+  // A way back to the pane when the person closed it.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey || !(await read($, isPaneClosed))) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    return (
+      <Box gap={1} alignItems="center">
+        <Text dimColor>The Session pane is closed.</Text>
+        <Button key="reopen" onPress={() => openPane($)}>
+          Open it
+        </Button>
+      </Box>
+    )
+  })
+
+  // Each turn's cost, and the vault files it used, under the reply that
+  // closed it.
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    const drawn = await next(e)
+    const text = e.props.text.trim()
+    if (!text || e.props.isSummary) return drawn
+
+    const key = hash(text)
+    const turn = (await read($, turns)).find(t => t.answerHash === key)
+    if (!turn) return drawn
+
+    const { Box, Text } = $.ui.resolve(e)
+    const share = cachedShare(turn)
+    const cost = [
+      `Turn ${turn.n}: ${usd(turn.usd)}`,
+      share === undefined ? undefined : `${share}% of input from cache`,
+    ].filter(Boolean)
+    const used = [
+      ...new Set(
+        (await read($, reads))
+          .filter(r => r.turn === turn.n && !isFolder(r.path))
+          .map(r => fileLabel(r.path)),
+      ),
+    ]
+
+    return (
+      <Box flexDirection="column">
+        {drawn}
+        <Text dimColor tabular>
+          {cost.join(' · ')}
+        </Text>
+        {used.length > 0 && (
+          <Text dimColor>
+            {VAULT_NAME}: {used.join(', ')}
+          </Text>
+        )}
+      </Box>
+    )
+  })
+
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const table = $.ui.resolve(e)
+    const { Box, Text, Button } = table
+    const Svg = 'Svg' in table ? table.Svg : undefined
+    const list = await read($, turns)
+    const sum = await read($, totals)
+    const vault = await read($, reads)
+    const added = await read($, folders)
+    const stored = await read($, open)
+    const shown: string[] = Array.isArray(stored) ? stored : []
+    const now = await $.clock.now()
+    const cwd = await $.session.cwd()
+    const promptCount = await $.session.turns()
+    const last = list.at(-1)
+    const isOpen = (id: string) => shown.includes(id)
+    const toggle = (id: string) => () =>
+      update($, open, current => {
+        const ids: string[] = Array.isArray(current) ? current : []
+        return ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id]
+      })
+
+    // ---- drawing pieces
+
+    // A thin rounded bar like the rail's, in coloured segments: an image on
+    // the graphical surfaces, a row of blocks in the terminal.
+    const bar = (key: string, alt: string, segments: { share: number; color: string }[]) => {
+      if (Svg) {
+        let x = 0
+        const rects = segments
+          .map(s => {
+            const w = Math.max(0, Math.min(1000 - x, s.share * 1000))
+            const r = `<rect x="${x.toFixed(1)}" width="${w.toFixed(1)}" height="18" fill="${s.color}"/>`
+            x += w
+            return r
+          })
+          .join('')
+        return (
+          <Svg
+            key={key}
+            alt={alt}
+            source={`<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="18" viewBox="0 0 1000 18"><defs><clipPath id="r"><rect width="1000" height="18" rx="9"/></clipPath></defs><g clip-path="url(#r)"><rect width="1000" height="18" fill="#8a8a8a" fill-opacity="0.22"/>${rects}</g></svg>`}
+          />
+        )
+      }
+      const cells = Math.max(10, Math.min(40, e.props.bodyColumns))
+      return (
+        <Text key={key}>
+          {segments.map((s, i) => (
+            <Text key={`${key}-${i}`} color={s.color}>
+              {'━'.repeat(Math.round(s.share * cells))}
+            </Text>
+          ))}
+          <Text dimColor>
+            {'━'.repeat(Math.max(0, cells - segments.reduce((n, s) => n + Math.round(s.share * cells), 0)))}
+          </Text>
+        </Text>
+      )
+    }
+
+    const heading = (words: string) => <Text weight="medium">{words}</Text>
+
+    const row = (label: string, value: string) => (
+      <Box justifyContent="space-between" gap={1}>
+        <Text>{label}</Text>
+        <Text tabular>{value}</Text>
+      </Box>
+    )
+
+    const detail = (key: string, label: string, value: string, isDim = true) => (
+      <Box key={key} justifyContent="space-between" gap={1} paddingLeft={2}>
+        <Text dimColor={isDim}>{label}</Text>
+        <Text dimColor={isDim} tabular>
+          {value}
+        </Text>
+      </Box>
+    )
+
+    // A row that opens and closes what is under it, with the rail's arrow.
+    const disclosure = (id: string, label: string, value: string, isDim = false) => (
+      <Box justifyContent="space-between" gap={1}>
+        <Button key={id} plain dimColor={isDim} onPress={toggle(id)}>
+          <Text dimColor>{isOpen(id) ? '⌄ ' : '› '}</Text>
+          {label}
+        </Button>
+        <Text tabular dimColor={isDim}>
+          {value}
+        </Text>
+      </Box>
+    )
+
+    // ---- cost
+    const cost = (
+      <Box flexDirection="column" gap={1}>
+        {heading('Cost')}
+        {row('Session total', usd(sum.usd))}
+        <Box flexDirection="column">
+          {disclosure('turns', 'Turns', String(Math.max(promptCount, list.length)))}
+          {isOpen('turns') &&
+            (list.length === 0
+              ? detail('none', 'No finished turns yet', '')
+              : list
+                  .slice(-30)
+                  .reverse()
+                  .map(t =>
+                    detail(`t${t.n}`, `Turn ${t.n}, ${seconds(t.durationMs)}`, usd(t.usd)),
+                  ))}
+        </Box>
+        <Box flexDirection="column">
+          {disclosure('last', 'Last turn', last ? usd(last.usd) : 'n/a')}
+          {isOpen('last') && last && (
+            <Box flexDirection="column">
+              {detail('time', 'Time', seconds(last.durationMs))}
+              {last.model && detail('model', 'Model', last.model)}
+              {detail('in', 'New input', tokens(last.input))}
+              {detail('cr', 'Read from cache', tokens(last.cacheRead))}
+              {detail('cw', 'Written to cache', tokens(last.cacheWrite))}
+              {detail('out', 'Output', tokens(last.output))}
+              {cachedShare(last) !== undefined &&
+                detail('share', 'Input from cache', `${cachedShare(last)}%`)}
+              {last.subagentRuns > 0 &&
+                detail('sub', 'Subagent runs', String(last.subagentRuns))}
+            </Box>
+          )}
+        </Box>
+      </Box>
+    )
+
+    // ---- plan limits
+    const limits = sum.limits.length > 0 && (
+      <Box flexDirection="column" gap={1}>
+        {heading('Plan limits')}
+        {sum.limits.map(l => (
+          <Box key={l.kind} flexDirection="column">
+            {row(limitName(l.kind), `${l.percentUsed}% used`)}
+            {bar(`bar-${l.kind}`, `${limitName(l.kind)}: ${l.percentUsed}% used`, [
+              { share: l.percentUsed / 100, color: l.percentUsed >= 80 ? AMBER : BLUE },
+            ])}
+            {resetsIn(l.resetsAt, now) && <Text dimColor>{resetsIn(l.resetsAt, now)}</Text>}
+          </Box>
+        ))}
+      </Box>
+    )
+
+    // ---- context, coloured by what fills it
+    const ctx = sum.context
+    const context = ctx && ctx.percent !== undefined && (
+      <Box flexDirection="column" gap={1}>
+        {heading('Context')}
+        <Box flexDirection="column">
+          {disclosure(
+            'context',
+            `${ctx.percent}% used`,
+            `${tokens(ctx.tokens ?? 0)} / ${tokens(ctx.window)}`,
+          )}
+          {bar(
+            'bar-context',
+            `Context: ${ctx.percent}% used`,
+            ctx.parts.map(part => ({ share: part.tokens / ctx.window, color: partColor(part.name) })),
+          )}
+          {isOpen('context') &&
+            ctx.parts.map(part => (
+              <Box key={`c-${part.name}`} justifyContent="space-between" gap={1} paddingLeft={2}>
+                <Text>
+                  <Text color={partColor(part.name)}>■ </Text>
+                  <Text dimColor>{part.name}</Text>
+                </Text>
+                <Text dimColor tabular>
+                  {tokens(part.tokens)}
+                </Text>
+              </Box>
+            ))}
+        </Box>
+      </Box>
+    )
+
+    // ---- folders: a name with a folder mark; the path shows on hover,
+    // and a press opens the folder.
+    const dirs = [cwd, ...added.filter(d => d !== cwd)]
+    const hasVaultFolder = dirs.some(d => vaultPaths(d).length > 0)
+    const folderList = (
+      <Box flexDirection="column" gap={1}>
+        {heading('Folders')}
+        <Box flexDirection="column">
+          {dirs.map((d, i) => (
+            <Box key={`d-${i}`} flexDirection="column" hover={{ scope: `dir-${i}` }}>
+              <Box gap={1} alignItems="center">
+                {Svg ? (
+                  <Svg alt="Folder" width={16} height={16} source={FOLDER_ICON} />
+                ) : (
+                  <Text dimColor>▸</Text>
+                )}
+                <Button
+                  key={`open-${i}`}
+                  plain
+                  hover={{ scope: `dir-${i}`, underline: true }}
+                  onPress={() => openFolder($, d)}
+                >
+                  {d.split('/').filter(Boolean).pop() ?? d}
+                </Button>
+              </Box>
+              <Box display="none" hover={{ scope: `dir-${i}`, display: 'flex' }} paddingLeft={3}>
+                <Text dimColor wrap="truncate-start">
+                  {shortPath(d)}
+                </Text>
+              </Box>
+            </Box>
+          ))}
+        </Box>
+      </Box>
+    )
+
+    // ---- vault: what was read, by folder; what the last reply used is
+    // drawn bright, the rest dim.
+    const tokensOf = new Map<string, number>()
+    for (const r of vault) tokensOf.set(r.path, Math.max(tokensOf.get(r.path) ?? 0, r.tokens))
+    const usedNow = new Set(vault.filter(r => r.turn === promptCount).map(r => r.path))
+    const files = [...tokensOf.keys()].filter(p => !isFolder(p))
+    const vaultTokens = [...tokensOf.values()].reduce((n, x) => n + x, 0)
+    const groups = new Map<string, string[]>()
+    for (const p of tokensOf.keys()) {
+      const g = groupOf(p)
+      groups.set(g, [...(groups.get(g) ?? []), p])
+    }
+    const groupRows = [...groups.entries()]
+      .map(([name, paths]) => ({
+        name,
+        paths: paths.sort((a, b) => (tokensOf.get(b) ?? 0) - (tokensOf.get(a) ?? 0)),
+        tokens: paths.reduce((n, p) => n + (tokensOf.get(p) ?? 0), 0),
+        isUsed: paths.some(p => usedNow.has(p)),
+      }))
+      .sort((a, b) => b.tokens - a.tokens || b.paths.length - a.paths.length)
+    const isMissing = vault.length === 0 && !hasVaultFolder
+
+    const vaultBody = isMissing ? (
+      <Text color="warning">Not loaded in this session</Text>
+    ) : vault.length === 0 ? (
+      <Text dimColor>Added, nothing read yet</Text>
+    ) : (
+      <Box flexDirection="column" gap={1}>
+        {row(
+          `${files.length} ${files.length === 1 ? 'file' : 'files'} read`,
+          vaultTokens > 0 ? `about ${tokens(vaultTokens)} tokens` : '',
+        )}
+        <Box flexDirection="column" gap={1}>
+          {groupRows.map(g => {
+            const share = vaultTokens > 0 ? g.tokens / vaultTokens : 0
+            const value =
+              g.tokens > 0
+                ? `${Math.round(share * 100)}% · ${tokens(g.tokens)}`
+                : `${g.paths.length} ${g.paths.length === 1 ? 'item' : 'items'}`
+            return (
+              <Box key={`g-${g.name}`} flexDirection="column">
+                {disclosure(`g:${g.name}`, g.name, value, !g.isUsed)}
+                {g.tokens > 0 &&
+                  bar(`bar-g-${g.name}`, `${g.name}: ${Math.round(share * 100)}% of vault tokens read`, [
+                    { share, color: g.isUsed ? BLUE : BLUE_DIM },
+                  ])}
+                {isOpen(`g:${g.name}`) &&
+                  g.paths.map(p =>
+                    detail(
+                      `p-${p}`,
+                      isFolder(p) ? `${fileLabel(p)} (looked through)` : fileLabel(p),
+                      (tokensOf.get(p) ?? 0) > 0 ? tokens(tokensOf.get(p) ?? 0) : '',
+                      !usedNow.has(p),
+                    ),
+                  )}
+              </Box>
+            )
+          })}
+        </Box>
+      </Box>
+    )
+
+    return (
+      <Box flexDirection="column" gap={2}>
+        {cost}
+        {limits}
+        {context}
+        {folderList}
+        <Box flexDirection="column" gap={1}>
+          {heading(VAULT_NAME)}
+          {vaultBody}
+        </Box>
+      </Box>
+    )
+  })
+}
