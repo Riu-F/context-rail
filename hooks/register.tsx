@@ -35,12 +35,13 @@ const focus = atom({ plugin: 'context-rail', key: 'focus' } as const, null)
 // Bumped when the vault index is built, so the pane redraws with the links.
 // Which drawing the vault section shows.
 const view = atom({ plugin: 'context-rail', key: 'view' } as const, 'map')
+// Buttons hold text, so each view's icon is a symbol of the system font.
 const VIEWS = [
-  { id: 'map', label: 'Map' },
-  { id: 'share', label: 'Share' },
-  { id: 'timeline', label: 'Timeline' },
-  { id: 'treemap', label: 'Treemap' },
-  { id: 'gaps', label: 'Gaps' },
+  { id: 'map', label: 'Map', icon: '⛬' },
+  { id: 'share', label: 'Share', icon: '◔' },
+  { id: 'timeline', label: 'Timeline', icon: 'ılı' },
+  { id: 'treemap', label: 'Treemap', icon: '◫' },
+  { id: 'gaps', label: 'Gaps', icon: '⬚' },
 ] as const
 const indexStamp = atom({ plugin: 'context-rail', key: 'indexStamp' } as const, 0)
 
@@ -816,17 +817,6 @@ export const register: Register = on => {
             `Context: ${ctx.percent}% used`,
             ctxParts.map(part => ({ share: part.tokens / ctx.window, color: partColor(part.name) })),
           )}
-          {vaultInContext > 0 && (
-            <Box justifyContent="space-between" gap={1}>
-              <Text>
-                <Text color={partColor(VAULT_NAME)}>■ </Text>
-                {VAULT_NAME}
-              </Text>
-              <Text tabular>
-                {`${Math.round((vaultInContext / ctx.window) * 100)}% · ${tokens(vaultInContext)}`}
-              </Text>
-            </Box>
-          )}
           {isOpen('context') &&
             ctxParts.map(part => (
               <Box key={`c-${part.name}`} justifyContent="space-between" gap={1} paddingLeft={2}>
@@ -897,17 +887,22 @@ export const register: Register = on => {
           `${files.length} ${files.length === 1 ? 'file' : 'files'} read`,
           vaultTokens > 0 ? tokens(vaultTokens) : '',
         )}
-        <Box gap={2} flexWrap="wrap">
-          {VIEWS.map(v => (
-            <Button
-              key={`view:${v.id}`}
-              plain
-              dimColor={chosenView !== v.id}
-              onPress={() => update($, view, () => v.id)}
-            >
-              {chosenView === v.id ? <Text weight="medium">{v.label}</Text> : v.label}
-            </Button>
-          ))}
+        <Box justifyContent="space-between" alignItems="center" gap={1}>
+          <Box gap={2}>
+            {VIEWS.map(v => (
+              <Button
+                key={`view:${v.id}`}
+                plain
+                label={v.label}
+                dimColor={chosenView !== v.id}
+                hover={{ scope: `view-${v.id}`, dimColor: false }}
+                onPress={() => update($, view, () => v.id)}
+              >
+                {v.icon}
+              </Button>
+            ))}
+          </Box>
+          <Text dimColor>{VIEWS.find(v => v.id === chosenView)?.label ?? ''}</Text>
         </Box>
         {chosenView === 'gaps'
           ? gapRows

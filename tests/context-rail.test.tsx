@@ -192,8 +192,9 @@ test('each view draws, and the vault shows as its own part of the context', asyn
   await oneTurn($, cost)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const text = async (re: RegExp) => (await ui.find({ type: 'Text', text: re }))?.text
-  // 4000 characters read: about 1.0k tokens, all of it inside Messages.
-  expect(await text(/^0% · 1\.0k$/)).toBe('0% · 1.0k')
+  // The vault's tokens are a purple segment of the context bar.
+  const bars = await ui.findAll({ type: 'Svg' } as never)
+  expect(bars.some((g: any) => String(g?.props?.source ?? '').includes('#c084fc'))).toBe(true)
   for (const id of ['share', 'timeline', 'treemap']) {
     await ui.press({ key: `view:${id}` })
     const svgs = await ui.findAll({ type: 'Svg' } as never)
